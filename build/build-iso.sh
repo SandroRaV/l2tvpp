@@ -21,6 +21,12 @@ cp "$REPO"/build/out/*.deb "$WORK/vyos-build/packages/"
 install -m 0755 "$REPO"/build/vyos-hooks/*.chroot \
   "$WORK/vyos-build/data/live-build-config/hooks/live/"
 
+# bake the sync daemon + its systemd unit into the image rootfs
+INC="$WORK/vyos-build/data/live-build-config/includes.chroot"
+install -d "$INC/usr/libexec/l2tvpp" "$INC/lib/systemd/system"
+install -m 0755 "$REPO"/syncd/l2tvppd.py "$INC/usr/libexec/l2tvpp/l2tvppd.py"
+install -m 0644 "$REPO"/build/vyos-image/l2tvppd.service "$INC/lib/systemd/system/l2tvppd.service"
+
 docker run --rm $TTY -v "$WORK/vyos-build:/vyos" -w /vyos --privileged \
   "vyos/vyos-build:$BRANCH" \
   bash -c 'sudo make clean && sudo ./build-vyos-image generic --architecture amd64 --build-by l2tvpp --build-type release --version "$(date +%Y%m%d)-l2tvpp"'

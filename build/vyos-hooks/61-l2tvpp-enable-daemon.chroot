@@ -1,0 +1,11 @@
+#!/bin/sh
+# Copyright (c) 2026 Default Gateway GmbH
+# SPDX-License-Identifier: Apache-2.0
+#
+# Enable the baked l2tvppd service in the image so VPP takes over the L2TP
+# data plane automatically on every boot. Runs in the image chroot.
+set -e
+if [ -f /lib/systemd/system/l2tvppd.service ]; then
+    systemctl enable l2tvppd.service || true
+    echo "I: l2tvpp: enabled l2tvppd.service"
+fi

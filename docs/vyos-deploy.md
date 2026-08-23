@@ -10,6 +10,15 @@ every other VPP plugin, and lands in the image's `vpp-plugin-core` package.
 > no VyOS patches, possibly a different glibc) onto VyOS. Use one of the two
 > paths below.
 
+**Control vs data.** accel-ppp still runs the L2TP/PPP *control* plane
+(tunnel/session negotiation, LCP, auth, IPCP, RADIUS) - VPP cannot do that.
+The *data* plane is VPP's: the plugin owns udp/1701, so once a session is
+mirrored into VPP, subscriber packets are decapped/forwarded by VPP and only
+control frames are punted to accel-ppp. accel-ppp never forwards subscriber
+traffic. In the baked image (path 2) the sync daemon runs automatically, so
+this happens with no configuration; the only window where a packet could
+reach the kernel is the ~seconds before a brand-new session is mirrored.
+
 Prerequisites on the build host (a Linux box with Docker; the dev VM works
 once `docker.io` is installed):
 
@@ -109,9 +118,22 @@ vppctl l2tvpp handoff on         # spread decap across workers (optional)
 
 ## 4. Run the sync daemon
 
-accel-ppp keeps terminating L2TP/PPP as today; `l2tvppd` mirrors each session
-it brings up into VPP (`../syncd/`). Put the daemon on the box (persist under
-`/config` on VyOS so it survives upgrades):
+**In the baked image (path 2) this is already done:** `l2tvppd` is installed
+at `/usr/libexec/l2tvpp/l2tvppd.py` and enabled as `l2tvppd.service`, running
+`daemon --interval 5` with the LNS local IP auto-derived per tunnel from
+`ip l2tp show tunnel` - zero config. Check it:
+
+```
+systemctl status l2tvppd
+journalctl -u l2tvppd -f
+```
+
+Override args (rare) via `/config/l2tvpp/l2tvppd.env` (`L2TVPPD_ARGS=...`),
+which persists across upgrades. Skip the rest of this section on a baked
+image.
+
+For the quick/dpkg path (path 1), put the daemon on the box yourself
+(persist under `/config` so it survives upgrades):
 
 ```
 sudo mkdir -p /config/l2tvpp

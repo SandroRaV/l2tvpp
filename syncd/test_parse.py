@@ -77,5 +77,24 @@ class TestParse(unittest.TestCase):
         self.assertNotIn("fe80::2/128", routes)          # link-local excluded
 
 
+
+    def test_parse_l2tp_tunnels(self):
+        text = ("Tunnel 100, encap UDP\n"
+                "  From 10.66.0.1 to 10.66.0.2\n"
+                "  Peer tunnel 200\n"
+                "  UDP source / dest ports: 1701/1701\n"
+                "  UDP checksum: disabled\n"
+                "Tunnel 101, encap UDP\n"
+                "  From 10.66.0.5 to 10.66.0.9\n"
+                "  Peer tunnel 201\n"
+                "  UDP source / dest ports: 1701/1702\n")
+        tuns = l2tvppd.parse_l2tp_tunnels(text)
+        self.assertEqual(tuns[100]["local_ip"], "10.66.0.1")
+        self.assertEqual(tuns[100]["peer_ip"], "10.66.0.2")
+        self.assertEqual(tuns[100]["local_port"], 1701)
+        self.assertEqual(tuns[101]["local_ip"], "10.66.0.5")
+        self.assertEqual(tuns[101]["peer_port"], 1702)
+
+
 if __name__ == "__main__":
     unittest.main()

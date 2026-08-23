@@ -85,7 +85,7 @@ def parse_pppol2tp(text):
                 "peer_tid": int(m.group("ptid"), 16),
                 "peer_sid": int(m.group("psid"), 16),
                 "ifname": None,
-                "routes": [],       # subscriber prefixes, filled from ip addr
+                "routes": None,     # subscriber prefixes; fetched lazily on add
             }
             sessions.append(cur)
             continue
@@ -117,15 +117,61 @@ def _ppp_routes(ifname, run=subprocess.run):
     return sorted(set(routes))
 
 
+TUNNEL_RE = re.compile(r"^Tunnel\s+(?P<tid>\d+),")
+FROM_TO_RE = re.compile(r"^\s*From\s+(?P<local>\S+)\s+to\s+(?P<peer>\S+)")
+PORTS_RE = re.compile(r"UDP source / dest ports:\s*(?P<sport>\d+)/(?P<dport>\d+)")
+
+
+def parse_l2tp_tunnels(text):
+    """Parse `ip l2tp show tunnel` into {local_tid: {local_ip, peer_ip,
+    local_port, peer_port}}. This is where the LNS-local endpoint comes from -
+    /proc/net/pppol2tp only carries the peer address. Pure, so it is tested."""
+    tunnels, cur = {}, None
+    for line in text.splitlines():
+        m = TUNNEL_RE.match(line)
+        if m:
+            cur = {"local_ip": None, "peer_ip": None,
+                   "local_port": 1701, "peer_port": 1701}
+            tunnels[int(m.group("tid"))] = cur
+            continue
+        if cur is None:
+            continue
+        m = FROM_TO_RE.match(line)
+        if m:
+            cur["local_ip"] = m.group("local")
+            cur["peer_ip"] = m.group("peer")
+            continue
+        m = PORTS_RE.search(line)
+        if m:
+            cur["local_port"] = int(m.group("sport"))
+            cur["peer_port"] = int(m.group("dport"))
+    return tunnels
+
+
+def kernel_tunnels(run=subprocess.run):
+    out = run(["ip", "l2tp", "show", "tunnel"],
+              capture_output=True, text=True).stdout
+    return parse_l2tp_tunnels(out)
+
+
 def kernel_sessions(run=subprocess.run):
+    """Enumerate kernel L2TP/PPP sessions cheaply: two reads
+    (/proc/net/pppol2tp + `ip l2tp show tunnel`) regardless of session count.
+    Per-session subscriber routes are NOT fetched here - reconcile pulls them
+    only for sessions it is about to install, so the steady-state poll stays
+    cheap with hundreds of sessions."""
     try:
         text = open("/proc/net/pppol2tp").read()
     except FileNotFoundError:
         sys.exit("/proc/net/pppol2tp missing: l2tp_ppp not loaded or no sessions")
     ss = parse_pppol2tp(text)
+    tuns = kernel_tunnels(run=run)
     for s in ss:
-        if s["ifname"]:
-            s["routes"] = _ppp_routes(s["ifname"], run=run)
+        # local endpoint per tunnel from `ip l2tp show tunnel` (auto, no config)
+        t = tuns.get(s["local_tid"])
+        if t and t["local_ip"]:
+            s["local_ip"] = t["local_ip"]
+            s["local_port"] = t["local_port"]
     return ss
 
 
@@ -146,8 +192,10 @@ class Syncd:
     client only needs the l2tvpp_* and ip_route_add_del calls; a make-test
     can pass VPP's own test-framework client instead of a real one."""
 
-    def __init__(self, vpp, local_ip, local_port=1701, state_path=None):
+    def __init__(self, vpp, local_ip=None, local_port=1701, state_path=None):
         self.vpp = vpp
+        # fallback local endpoint; per-session values from `ip l2tp show
+        # tunnel` (s["local_ip"]) take precedence, so this is usually unused
         self.local_ip = local_ip
         self.local_port = local_port
         # session_key(str) -> installed record {sw_if_index, tunnel_index,
@@ -190,15 +238,25 @@ class Syncd:
         tk = tunnel_key(s)
         if tk in cache:
             return cache[tk]
+        local_ip = s.get("local_ip") or self.local_ip
+        if not local_ip:
+            raise RuntimeError(
+                "no local IP for tunnel %s: `ip l2tp show tunnel` gave none "
+                "and no --local-ip fallback set" % (tk,))
+        local_port = s.get("local_port") or self.local_port
         r = self.vpp.l2tvpp_tunnel_add_del(
-            is_add=True, local_ip=self.local_ip, peer_ip=s["peer_ip"],
-            local_port=self.local_port, peer_port=s["peer_port"],
+            is_add=True, local_ip=local_ip, peer_ip=s["peer_ip"],
+            local_port=local_port, peer_port=s["peer_port"],
             local_tid=s["local_tid"], peer_tid=s["peer_tid"])
         cache[tk] = r.tunnel_index
         log.info("tunnel + %s -> %d", tk, r.tunnel_index)
         return r.tunnel_index
 
-    def add_session(self, s, tunnels_cache):
+    def add_session(self, s, tunnels_cache, run=subprocess.run):
+        # subscriber routes are fetched lazily, only for the session being
+        # installed (unless the caller already supplied them, e.g. a test)
+        if s.get("routes") is None:
+            s["routes"] = _ppp_routes(s["ifname"], run=run) if s["ifname"] else []
         tidx = self.ensure_tunnel(s, tunnels_cache)
         r = self.vpp.l2tvpp_session_add_del(
             is_add=True, tunnel_index=tidx,
@@ -268,18 +326,25 @@ class Syncd:
                    "paths": [path]})
 
     # -- the reconcile pass ------------------------------------------------
-    def reconcile(self, ksessions):
+    def reconcile(self, ksessions, sync_existing_routes=True, run=subprocess.run):
         """Make VPP match the given kernel session list, using our own record
-        of what we installed. Returns (added, removed)."""
+        of what we installed. Returns (added, removed).
+
+        sync_existing_routes re-checks routes of already-installed sessions
+        (to catch a subscriber gaining/losing a delegated prefix). It costs
+        an `ip` call per existing session, so the daemon loop runs it only
+        every few passes; adds/removes are always handled."""
         want = {"%d/%d" % session_key(s): s for s in ksessions if s["ifname"]}
         tunnels_cache = self.vpp_tunnels()
 
         added = removed = 0
         for key, s in want.items():
             if key not in self.installed:
-                self.add_session(s, tunnels_cache)
+                self.add_session(s, tunnels_cache, run=run)
                 added += 1
-            else:
+            elif sync_existing_routes:
+                if s.get("routes") is None:
+                    s["routes"] = _ppp_routes(s["ifname"], run=run)
                 self.sync_routes(s)
         for key in list(self.installed):
             if key not in want:
@@ -317,20 +382,40 @@ def run_once(local_ip, local_port, state_path):
         vpp.disconnect()
 
 
+def connect_vpp_retry(interval):
+    """Wait for VPP to be up rather than crash-looping under systemd: the
+    daemon may start before VPP is configured/ready."""
+    while True:
+        try:
+            return connect_vpp()
+        except SystemExit:
+            raise
+        except Exception as e:
+            log.info("VPP API not ready (%s); retrying in %ds", e, interval)
+            time.sleep(interval)
+
+
 def run_daemon(local_ip, local_port, interval, state_path):
-    vpp = connect_vpp()
+    vpp = connect_vpp_retry(interval)
     sync = Syncd(vpp, local_ip, local_port, state_path)
     wake = {"now": True}
     signal.signal(signal.SIGHUP, lambda *_: wake.__setitem__("now", True))
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
-    log.info("l2tvppd up: local %s:%d, safety-net reconcile every %ds, SIGHUP to poke",
-             local_ip, local_port, interval)
+    log.info("l2tvppd up: reconcile every %ds (SIGHUP to poke), local-ip "
+             "auto per tunnel%s", interval,
+             "" if local_ip is None else " (fallback %s)" % local_ip)
+    # cheap adds/removes every tick; the costlier per-session route re-check
+    # (delegated-prefix changes) only every ~6 ticks
+    ROUTE_RESYNC_EVERY = 6
+    tick = 0
     try:
         while True:
             if wake["now"]:
                 wake["now"] = False
                 try:
-                    sync.reconcile(kernel_sessions())
+                    sync.reconcile(kernel_sessions(),
+                                   sync_existing_routes=(tick % ROUTE_RESYNC_EVERY == 0))
+                    tick += 1
                 except Exception:               # never let one bad pass kill the loop
                     log.exception("reconcile failed; will retry")
             for _ in range(interval):
@@ -345,8 +430,9 @@ def main():
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("mode", choices=["reconcile", "daemon"])
-    p.add_argument("--local-ip", default="10.66.0.1",
-                   help="LNS tunnel endpoint (accel-ppp outside-address)")
+    p.add_argument("--local-ip", default=None,
+                   help="fallback LNS tunnel endpoint; normally auto-derived "
+                        "per tunnel from `ip l2tp show tunnel`, so leave unset")
     p.add_argument("--local-port", type=int, default=1701)
     p.add_argument("--interval", type=int, default=30,
                    help="daemon safety-net reconcile interval (s)")

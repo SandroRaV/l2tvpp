@@ -1,0 +1,25 @@
+# Copyright (c) 2026 Default Gateway GmbH
+# SPDX-License-Identifier: Apache-2.0
+#
+# Baked into the l2tvpp VyOS image (see build/build-iso.sh). Zero-config:
+# the LNS local IP/port are auto-derived per tunnel from `ip l2tp show
+# tunnel`, so nothing rig-specific is needed. accel-ppp keeps doing the
+# L2TP/PPP control plane; this daemon makes VPP own the data plane by
+# mirroring every session accel-ppp brings up. It waits for VPP if VPP is
+# not configured yet.
+[Unit]
+Description=l2tvpp sync daemon (VPP owns the L2TP data plane)
+After=vpp.service
+Wants=vpp.service
+
+[Service]
+Type=simple
+Environment=PYTHONPATH=/usr/lib/python3/dist-packages
+# optional per-box overrides (L2TVPPD_ARGS=...) without editing the unit
+EnvironmentFile=-/config/l2tvpp/l2tvppd.env
+ExecStart=/usr/bin/python3 /usr/libexec/l2tvpp/l2tvppd.py daemon --interval 5 --state /run/l2tvppd.json $L2TVPPD_ARGS
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
