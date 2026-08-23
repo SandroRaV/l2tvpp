@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright (c) 2026 Sandro (ravana.me)
+# Copyright (c) 2026 Default Gateway GmbH
 # SPDX-License-Identifier: Apache-2.0
 # Build the VyOS VPP .debs (stable/2510 + vyos-vpp-patches) WITH the l2tp2
 # plugin inside, using VyOS's own build container so the result matches the

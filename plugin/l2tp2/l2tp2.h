@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026 Sandro (ravana.me)
+ * Copyright (c) 2026 Default Gateway GmbH
  * SPDX-License-Identifier: Apache-2.0
  *
  * Licensed under the Apache License, Version 2.0 (the "License");

@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Sandro (ravana.me)
+# Copyright (c) 2026 Default Gateway GmbH
 # SPDX-License-Identifier: Apache-2.0
 """
 VPP make-test suite for the l2tp2 plugin (runs under vpp/test with scapy,
