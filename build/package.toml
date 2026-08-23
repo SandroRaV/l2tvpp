@@ -1,5 +1,5 @@
 # Copy of vyos-build/scripts/package-build/vpp/package.toml (current branch,
-# see package.toml.vyos-orig) with ONE addition: the l2tp2 plugin is copied
+# see package.toml.vyos-orig) with ONE addition: the l2tvpp plugin is copied
 # into src/plugins/ before the VyOS build, so it ends up in the same
 # vpp-plugin-core .deb as every other plugin, built against the exact VPP
 # commit + VyOS patches the image uses. Keep this file in sync with upstream.
@@ -30,13 +30,13 @@ for patch in ../patches/vpp/*.patch; do
     git -c user.email=maintainers@vyos.net -c user.name=vyos am "$patch" || { echo "Failed to apply patch $patch"; exit 1; }
 done
 
-# --- lns-vpp addition: in-tree l2tp2 plugin (+ its make-test suite) ---
-rm -rf src/plugins/l2tp2
-cp -r /lns-vpp/plugin/l2tp2 src/plugins/l2tp2
-mkdir -p src/plugins/l2tp2/test
-cp /lns-vpp/test/test_l2tp2.py src/plugins/l2tp2/test/ 2>/dev/null || true
-git add src/plugins/l2tp2
-git -c user.email=dev@lns-vpp -c user.name=lns-vpp commit -q -m "l2tp2: LNS data plane plugin (lns-vpp)"
+# --- l2tvpp addition: in-tree l2tvpp plugin (+ its make-test suite) ---
+rm -rf src/plugins/l2tvpp
+cp -r /l2tvpp/plugin/l2tvpp src/plugins/l2tvpp
+mkdir -p src/plugins/l2tvpp/test
+cp /l2tvpp/test/test_l2tvpp.py src/plugins/l2tvpp/test/ 2>/dev/null || true
+git add src/plugins/l2tvpp
+git -c user.email=dev@l2tvpp -c user.name=l2tvpp commit -q -m "l2tvpp: LNS data plane plugin (l2tvpp)"
 # --- end addition ---
 
 make UNATTENDED=yes VPP_ENABLE_SYSTEMD_NOTIFY=ON install-dep

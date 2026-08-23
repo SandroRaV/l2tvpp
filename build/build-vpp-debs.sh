@@ -1,13 +1,13 @@
 #!/bin/bash
 # Copyright (c) 2026 Default Gateway GmbH
 # SPDX-License-Identifier: Apache-2.0
-# Build the VyOS VPP .debs (stable/2510 + vyos-vpp-patches) WITH the l2tp2
+# Build the VyOS VPP .debs (stable/2510 + vyos-vpp-patches) WITH the l2tvpp
 # plugin inside, using VyOS's own build container so the result matches the
-# image. Run on a Linux host with docker, from the lns-vpp repo root:
+# image. Run on a Linux host with docker, from the l2tvpp repo root:
 #
-#   /path/to/lns-vpp/build/build-vpp-debs.sh [vyos-build-branch]
+#   /path/to/l2tvpp/build/build-vpp-debs.sh [vyos-build-branch]
 #
-# Output: /path/to/lns-vpp/build/out/*.deb  (vpp, vpp-plugin-core, ...)
+# Output: /path/to/l2tvpp/build/out/*.deb  (vpp, vpp-plugin-core, ...)
 # Takes 30-60 min the first time (full VPP build).
 set -euo pipefail
 
@@ -27,7 +27,7 @@ cp "$REPO/build/package.toml" "$WORK/vyos-build/scripts/package-build/vpp/packag
 docker pull "vyos/vyos-build:$BRANCH"
 docker run --rm -it \
   -v "$WORK/vyos-build:/vyos" \
-  -v "$REPO:/lns-vpp:ro" \
+  -v "$REPO:/l2tvpp:ro" \
   -w /vyos/scripts/package-build/vpp \
   --privileged \
   "vyos/vyos-build:$BRANCH" \

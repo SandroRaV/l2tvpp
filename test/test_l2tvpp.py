@@ -1,11 +1,11 @@
 # Copyright (c) 2026 Default Gateway GmbH
 # SPDX-License-Identifier: Apache-2.0
 """
-VPP make-test suite for the l2tp2 plugin (runs under vpp/test with scapy,
-no NIC needed). Copied to src/plugins/l2tp2/test/ by build/package.toml.
+VPP make-test suite for the l2tvpp plugin (runs under vpp/test with scapy,
+no NIC needed). Copied to src/plugins/l2tvpp/test/ by build/package.toml.
 
 Run from a VPP source tree:
-    make test TEST=test_l2tp2 V=1
+    make test TEST=test_l2tvpp V=1
 
 M1 scope: the tests below are the acceptance criteria for the static data
 path. They are written first and fail until the plugin exists.
@@ -39,7 +39,7 @@ class TestL2tp2(VppTestCase):
     def setUp(self):
         super().setUp()
         # tunnel: LAC pg0.remote -> LNS pg0.local, tid 100 (ours) / 200 (LAC's)
-        self.tunnel = self.vapi.l2tp2_tunnel_add_del(
+        self.tunnel = self.vapi.l2tvpp_tunnel_add_del(
             is_add=True,
             local_ip=self.lac.local_ip4,
             peer_ip=self.lac.remote_ip4,
@@ -48,7 +48,7 @@ class TestL2tp2(VppTestCase):
             local_tid=100,
             peer_tid=200,
         ).tunnel_index
-        self.session = self.vapi.l2tp2_session_add_del(
+        self.session = self.vapi.l2tvpp_session_add_del(
             is_add=True,
             tunnel_index=self.tunnel,
             local_sid=1000,

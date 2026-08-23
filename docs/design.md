@@ -22,7 +22,7 @@ step 9 and step 11), with L2TP/UDP/IP instead of PPPoE/Ethernet:
 ```
  LAC ---UDP 1701---> [VPP access port]
                           |
-                    l2tp2-input (udp dst 1701)
+                    l2tvpp-input (udp dst 1701)
                           |
           +---------------+----------------------+
           | session known AND PPP proto IP/IPv6  | everything else
@@ -34,12 +34,12 @@ step 9 and step 11), with L2TP/UDP/IP instead of PPPoE/Ethernet:
                                               accel-ppp: control, LCP, auth,
                                               IPCP, echo, RADIUS
                                                  |
-                                              l2tp2-syncd: on session up,
+                                              l2tvpp-syncd: on session up,
                                               install session in VPP;
                                               on down, remove it
 
  Internet ---> [VPP uplink] -> FIB: subscriber /32 or /56 -> session interface
-                  -> l2tp2-encap (PPP + L2TP + UDP + IP) -> access port -> LAC
+                  -> l2tvpp-encap (PPP + L2TP + UDP + IP) -> access port -> LAC
 ```
 
 Packets that VPP does not own (control messages, LCP echo, IPCP, unknown
@@ -48,7 +48,7 @@ the existing kernel LNS keeps working underneath; VPP only takes over
 sessions that the sync daemon has installed. That also gives a trivial
 fallback: stop the daemon and everything runs in the kernel again.
 
-## 3. VPP plugin `l2tp2`
+## 3. VPP plugin `l2tvpp`
 
 Modelled on `src/plugins/pppoe/` (per-session interface, FIB adjacency,
 encap/decap nodes) and `src/vnet/udp/udp.h` port registration.
@@ -59,15 +59,15 @@ encap/decap nodes) and `src/vnet/udp/udp.h` port registration.
   id, peer tunnel id. Keyed by (peer ip, peer port, local tunnel id) on
   decap.
 - **session**: tunnel, local session id, peer session id, own
-  `sw_if_index` (a `l2tp2_session` interface, like `pppoe_session`), PPP
+  `sw_if_index` (a `l2tvpp_session` interface, like `pppoe_session`), PPP
   framing flags (ACFC/PFC as negotiated, needed for encap), counters.
   Decap key: (tunnel index, local session id).
 - Session lookup: bihash 16_8 keyed on (peer ip4, peer port, tunnel id,
   session id) -> session index. One lookup per packet.
 
-### 3b. Decap node `l2tp2-input`
+### 3b. Decap node `l2tvpp-input`
 
-Registered with `udp_register_dst_port(vm, 1701, l2tp2_input_node.index, 1)`
+Registered with `udp_register_dst_port(vm, 1701, l2tvpp_input_node.index, 1)`
 for IPv4 (IPv6 outer later).
 
 1. Read L2TPv2 flags. `T` set (control), version != 2, `S` set (sequenced)
@@ -101,7 +101,7 @@ a memcpy of the rewrite and two length/checksum fixups.
 ### 3d. Worker distribution
 
 ConnectX-4 Lx RSS sees only the outer tuple, so one LAC = one worker on RX.
-Add a handoff stage like `nat44-ed` does: `l2tp2-input` on the RX worker
+Add a handoff stage like `nat44-ed` does: `l2tvpp-input` on the RX worker
 parses just far enough to get the session index and enqueues the buffer to
 worker `session_index % n_workers` via `vlib_buffer_enqueue_to_thread`;
 that worker does decap and forwarding. Encap direction is already spread by
@@ -111,20 +111,20 @@ flag so both can be benchmarked.
 
 ### 3e. API and CLI
 
-`l2tp2.api`:
-- `l2tp2_tunnel_add_del(local_ip, peer_ip, local_port, peer_port, local_tid, peer_tid, is_add) -> tunnel_index`
-- `l2tp2_session_add_del(tunnel_index, local_sid, peer_sid, acfc, pfc, is_add) -> sw_if_index`
-- `l2tp2_session_dump`, `l2tp2_tunnel_dump`
-- `l2tp2_set_handoff(enable)`
+`l2tvpp.api`:
+- `l2tvpp_tunnel_add_del(local_ip, peer_ip, local_port, peer_port, local_tid, peer_tid, is_add) -> tunnel_index`
+- `l2tvpp_session_add_del(tunnel_index, local_sid, peer_sid, acfc, pfc, is_add) -> sw_if_index`
+- `l2tvpp_session_dump`, `l2tvpp_tunnel_dump`
+- `l2tvpp_set_handoff(enable)`
 
-CLI mirrors these: `l2tp2 tunnel add ...`, `l2tp2 session add ...`,
-`show l2tp2 tunnel`, `show l2tp2 session`.
+CLI mirrors these: `l2tvpp tunnel add ...`, `l2tvpp session add ...`,
+`show l2tvpp tunnel`, `show l2tvpp session`.
 
 Routes to the subscriber (IPv4 /32, IPv6 /128 and delegated prefix) are
 plain `ip_route_add_del` on the session interface, installed by the sync
 daemon, so the plugin stays FIB-agnostic.
 
-## 4. Sync daemon `l2tp2-syncd`
+## 4. Sync daemon `l2tvpp-syncd`
 
 Python with `vpp_papi` for the first version (fast to iterate; the rate of
 session events is RADIUS-bound, not a hot path). Rewrite in Go or C later if
@@ -172,7 +172,7 @@ stable for development). Output: M0 notes in `docs/`, decisions updated here.
 decap to `ip4-input`, encap via session interface, CLI and API, no handoff.
 Test with BNG Blaster in L2TP mode through mpd5 against a plain Linux
 accel-ppp LNS: install the session by hand from the CLI after it comes up
-in the kernel, watch `vppctl show l2tp2 session` counters move and the
+in the kernel, watch `vppctl show l2tvpp session` counters move and the
 kernel `pppN` counters stop. Benchmark single worker, one session.
 
 **M2, sync daemon (1 week)**: automatic install/remove from accel-ppp
@@ -205,13 +205,13 @@ offload vpp` or similar), docs in `manuals/dp/en/` with the German pair.
 ## 8. Repo layout
 
 ```
-lns-vpp/
+l2tvpp/
   docs/design.md          this file
   docs/m0-notes.md        findings from M0
-  plugin/l2tp2/           VPP plugin: CMakeLists.txt, l2tp2.api, l2tp2.h,
-                          l2tp2.c (objects, API, CLI), node.c (decap, handoff),
+  plugin/l2tvpp/           VPP plugin: CMakeLists.txt, l2tvpp.api, l2tvpp.h,
+                          l2tvpp.c (objects, API, CLI), node.c (decap, handoff),
                           encap.c (session interface tx)
-  syncd/                  l2tp2-syncd (python, vpp_papi)
+  syncd/                  l2tvpp-syncd (python, vpp_papi)
   lab/                    bngblaster + mpd5 + accel-ppp configs for M1/M2
   bench/                  results (md + html pairs)
 ```

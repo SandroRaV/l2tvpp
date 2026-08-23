@@ -2,9 +2,9 @@
 # Copyright (c) 2026 Default Gateway GmbH
 # SPDX-License-Identifier: Apache-2.0
 # Build a VyOS ISO that includes the .debs from build/out (our VPP build with
-# l2tp2). vyos-build picks up any .deb placed in its packages/ directory.
+# l2tvpp). vyos-build picks up any .deb placed in its packages/ directory.
 #
-#   /path/to/lns-vpp/build/build-iso.sh [vyos-build-branch]
+#   /path/to/l2tvpp/build/build-iso.sh [vyos-build-branch]
 set -euo pipefail
 
 BRANCH="${1:-current}"
@@ -18,6 +18,6 @@ cp "$REPO"/build/out/*.deb "$WORK/vyos-build/packages/"
 
 docker run --rm -it -v "$WORK/vyos-build:/vyos" -w /vyos --privileged \
   "vyos/vyos-build:$BRANCH" \
-  bash -c 'sudo make clean && sudo ./build-vyos-image generic --architecture amd64 --build-by lns-vpp --build-type release --version "$(date +%Y%m%d)-l2tp2"'
+  bash -c 'sudo make clean && sudo ./build-vyos-image generic --architecture amd64 --build-by l2tvpp --build-type release --version "$(date +%Y%m%d)-l2tvpp"'
 
 ls -la "$WORK"/vyos-build/build/*.iso

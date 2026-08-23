@@ -6,13 +6,13 @@ Fill in as answers are found. Each item has a decision that feeds `design.md`.
 - [ ] How `pppoe_session` interfaces are created (`pppoe_add_del_session`), tx function, adjacency caching via `fib_entry_track`
 - [ ] `pppoe_decap` node: how it selects next node, how unknown sessions are handled
 - [ ] Counters: `vnet_interface_main.combined_sw_if_counters` use per session
-Decision: confirm per-session-interface model for l2tp2.
+Decision: confirm per-session-interface model for l2tvpp.
 
 ## 2. VyOS pppoe offload wiring
 - [ ] Where the `vpp-cp` punt is configured (VyOS `vpp` python module, `vppctl show punt`), which node/tap receives punted frames
 - [ ] `vyos/accel-ppp-ng` source: the code that installs pppoe sessions into VPP (API calls, event hook), and whether an L2TP equivalent can be added there instead of a separate daemon
-- [ ] VPP version in the VyOS image (`vppctl show version`) and whether out-of-tree plugins load (`plugin l2tp2_plugin.so { enable }` in startup.conf)
-Decision: punt path for l2tp2-input; daemon vs accel-ppp-ng hook.
+- [ ] VPP version in the VyOS image (`vppctl show version`) and whether out-of-tree plugins load (`plugin l2tvpp_plugin.so { enable }` in startup.conf)
+Decision: punt path for l2tvpp-input; daemon vs accel-ppp-ng hook.
 
 ## 3. Kernel side
 - [ ] For a `pppN` created by accel-ppp over L2TP: get tunnel id, session id, peer ip/port (`ip l2tp show session`, `/proc/net/pppol2tp`, genetlink `L2TP_CMD_SESSION_GET`)

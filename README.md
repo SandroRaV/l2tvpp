@@ -1,4 +1,4 @@
-# lns-vpp
+# l2tvpp
 
 L2TPv2 LNS data plane for VPP, so an LNS on commodity hardware forwards beyond
 10G over L2TP. Control plane stays accel-ppp(-ng); this repo adds:
@@ -6,7 +6,7 @@ L2TPv2 LNS data plane for VPP, so an LNS on commodity hardware forwards beyond
 | Dir | What |
 |---|---|
 | `docs/` | `design.md` (architecture, milestones), `m0-notes.md` (open investigation items) |
-| `plugin/l2tp2/` | VPP plugin: L2TPv2 decap/encap, per-session interface, worker handoff |
+| `plugin/l2tvpp/` | VPP plugin: L2TPv2 decap/encap, per-session interface, worker handoff |
 | `syncd/` | daemon that installs accel-ppp sessions into VPP |
 | `test/` | VPP `make test` suite for the plugin (scapy, no NIC needed) |
 | `build/` | reproducible builds against VyOS's exact VPP (stable/2510 + vyos-vpp-patches), ISO build |
@@ -15,7 +15,7 @@ L2TPv2 LNS data plane for VPP, so an LNS on commodity hardware forwards beyond
 
 ## Testing tiers
 
-1. **Unit, no hardware**: `make test TEST=test_l2tp2` inside the VPP tree the
+1. **Unit, no hardware**: `make test TEST=test_l2tvpp` inside the VPP tree the
    build script produces (`build/work/vyos-build/scripts/package-build/vpp/vpp/`).
    Runs in CI.
 2. **VM lab**: VyOS ISO from `build/build-iso.sh` in KVM (virtio NICs), BNG
