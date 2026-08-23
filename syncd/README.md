@@ -1,8 +1,12 @@
 # l2tvpp-syncd
 
 Installs sessions that accel-ppp brought up into the VPP `l2tvpp` plugin and
-removes them on teardown. See `../docs/design.md` step 4. Written in M2, after
-M0 decides the event source (accel-ppp-ng hook, ip-up/ip-down scripts, or
-polling).
+removes them on teardown. See `../docs/design.md` step 4.
 
-Planned: Python 3 + `vpp_papi`, one file, systemd unit, `--reconcile` on start.
+- `l2tvpp-install.py` (M1, now): one-shot `list` / `apply` / `remove`. Reads
+  `/proc/net/pppol2tp` and `ip addr` on the LNS, drives `vppctl`, keeps what
+  it installed in `/run/l2tvpp-install.json`. Used by `../docs/rig-test.md`
+  step 6. Copy it to `/config/l2tvpp/` on the VyOS box (survives image
+  upgrades).
+- The M2 daemon: same data, `vpp_papi` instead of vppctl, event-driven
+  (accel-ppp ip-up/ip-down or netlink), `--reconcile` on start, systemd unit.

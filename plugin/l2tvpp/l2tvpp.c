@@ -17,6 +17,7 @@
 #include <vnet/plugin/plugin.h>
 #include <vpp/app/version.h>
 #include <vnet/adj/adj_midchain.h>
+#include <vnet/adj/adj_nbr.h>
 #include <vnet/fib/fib_table.h>
 #include <vnet/ip/ip4_packet.h>
 #include <vnet/udp/udp_packet.h>
@@ -155,11 +156,18 @@ static void
 l2tvpp_update_adj (vnet_main_t * vnm, u32 sw_if_index, adj_index_t ai)
 {
   l2tvpp_main_t *lm = &l2tvpp_main;
-  u32 si = lm->session_index_by_sw_if_index[sw_if_index];
-  l2tvpp_session_t *sess = pool_elt_at_index (lm->sessions, si);
-  l2tvpp_tunnel_t *t = pool_elt_at_index (lm->tunnels, sess->tunnel_index);
+  u32 si = (sw_if_index < vec_len (lm->session_index_by_sw_if_index)) ?
+    lm->session_index_by_sw_if_index[sw_if_index] : ~0;
+  l2tvpp_session_t *sess;
+  l2tvpp_tunnel_t *t;
   ip_adjacency_t *adj = adj_get (ai);
-  u8 *rw = l2tvpp_build_rewrite_i (sess, adj->ia_link);
+  u8 *rw;
+
+  if (si == ~0 || pool_is_free_index (lm->sessions, si))
+    return;
+  sess = pool_elt_at_index (lm->sessions, si);
+  t = pool_elt_at_index (lm->tunnels, sess->tunnel_index);
+  rw = l2tvpp_build_rewrite_i (sess, adj->ia_link);
 
   if (!rw)
     return;
@@ -180,6 +188,17 @@ l2tvpp_update_adj (vnet_main_t * vnm, u32 sw_if_index, adj_index_t ai)
  * (ip4-midchain -> adj-midchain-tx -> peer forwarding). Defining a device tx
  * function would instead route ip4-midchain into interface-N-output and drop
  * the encapsulated packet. */
+
+/* Drop the midchain delegate (and its fib_entry_track sibling) from every
+ * adjacency on the session interface before the interface is deleted, so no
+ * stale delegate lingers on the peer's FIB entry and the adjacency is freed
+ * cleanly for reuse. */
+static adj_walk_rc_t
+l2tvpp_adj_remove_delegate (adj_index_t ai, void *ctx)
+{
+  adj_midchain_delegate_remove (ai);
+  return ADJ_WALK_RC_CONTINUE;
+}
 
 static clib_error_t *
 l2tvpp_admin_up_down (vnet_main_t * vnm, u32 hw_if_index, u32 flags)
@@ -337,6 +356,10 @@ l2tvpp_session_add_del (l2tvpp_main_t * lm, u32 tunnel_index,
   vnet_sw_interface_set_flags (vnm, sess->sw_if_index, 0);
   clib_bihash_add_del_16_8 (&lm->session_by_key, &kv, 0);
   lm->session_index_by_sw_if_index[sess->sw_if_index] = ~0;
+  adj_nbr_walk (sess->sw_if_index, FIB_PROTOCOL_IP4,
+		l2tvpp_adj_remove_delegate, 0);
+  adj_nbr_walk (sess->sw_if_index, FIB_PROTOCOL_IP6,
+		l2tvpp_adj_remove_delegate, 0);
   vnet_reset_interface_l3_output_node (lm->vlib_main, sess->sw_if_index);
   vnet_delete_hw_interface (vnm, sess->hw_if_index);
   t->n_sessions--;

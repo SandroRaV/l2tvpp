@@ -170,10 +170,12 @@ stable for development). Output: M0 notes in `docs/`, decisions updated here.
 
 **M1, static data path (1-2 weeks)**: plugin with tunnel/session objects,
 decap to `ip4-input`, encap via session interface, CLI and API, no handoff.
-Test with BNG Blaster in L2TP mode through mpd5 against a plain Linux
-accel-ppp LNS: install the session by hand from the CLI after it comes up
-in the kernel, watch `vppctl show l2tvpp session` counters move and the
-kernel `pppN` counters stop. Benchmark single worker, one session.
+Test with BNG Blaster as LAC (PR 387, the verified two-box rig in
+`bngblaster-lac-l2tp-vyos-lns.md`) against the VyOS LNS: install the
+sessions after they come up in the kernel (`syncd/l2tvpp-install.py`),
+watch `vppctl show l2tvpp session` counters move and the kernel `pppN`
+counters stop. Procedure and measurements: `docs/rig-test.md`. Benchmark
+single worker, 500 sessions, against the kernel baseline on the same box.
 
 **M2, sync daemon (1 week)**: automatic install/remove from accel-ppp
 events, restart reconciliation, IPv6 and PD routes. Benchmark hundreds of

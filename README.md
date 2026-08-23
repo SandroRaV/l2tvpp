@@ -5,13 +5,14 @@ L2TPv2 LNS data plane for VPP, so an LNS on commodity hardware forwards beyond
 
 | Dir | What |
 |---|---|
-| `docs/` | `design.md` (architecture, milestones), `first-test.md` (how to build and test), `m0-notes.md` (open items) |
+| `docs/` | `design.md` (architecture, milestones), `first-test.md` (build and `make test`), `rig-test.md` (M1 on the BNG Blaster rig), `m0-notes.md` (open items) |
 | `plugin/l2tvpp/` | VPP plugin: L2TPv2 decap/encap, per-session interface, worker handoff |
-| `syncd/` | daemon that installs accel-ppp sessions into VPP |
+| `syncd/` | `l2tvpp-install.py` (M1: mirror the kernel's sessions into VPP via vppctl); the M2 daemon grows out of it |
 | `test/` | VPP `make test` suite for the plugin (scapy, no NIC needed) |
 | `build/` | `dev-build.sh` (plain VPP tree, fast loop), `build-vpp-debs.sh` (VyOS-identical packages), `build-iso.sh` |
 | `xdp/` | independent fallback: XDP cpumap steering for the *kernel* LNS path |
-| `lab/`, `bench/` | test rig configs and results |
+| `lab/` | `bngblaster/lac-test.json` (BNG Blaster PR 387 LAC config), `vyos/lns.txt` (LNS control plane) |
+| `bench/` | results (md + html pairs) |
 
 ## Testing tiers
 
@@ -20,7 +21,7 @@ L2TPv2 LNS data plane for VPP, so an LNS on commodity hardware forwards beyond
    Runs in CI.
 2. **VM lab**: VyOS ISO from `build/build-iso.sh` in KVM (virtio NICs), BNG
    Blaster + mpd5 VMs as LAC. Functional and churn tests.
-3. **Hardware**: EPYC 7F32 / ConnectX-4 Lx, BNG Blaster DPDK rig. Numbers.
+3. **Hardware**: BNG Blaster (PR 387 LAC mode) against the VyOS LNS, `docs/rig-test.md`. Numbers.
 
 ## Getting the plugin onto a VyOS box
 
