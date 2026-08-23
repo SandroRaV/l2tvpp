@@ -9,7 +9,8 @@
 #   /path/to/l2tvpp/build/dev-build.sh            # clone + deps + build + test
 #   /path/to/l2tvpp/build/dev-build.sh test       # rebuild + test only
 #
-# Debian 12 host, ~20 min first run, needs sudo for install-dep.
+# Debian 12/13 host, ~20 min first run, needs sudo for install-dep.
+# Output goes to the shell AND build/ci-logs/dev-build-<timestamp>.log.
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 VPP="${VPP_DIR:-$REPO/build/work/vpp}"
@@ -23,6 +24,12 @@ ln -sfn "$REPO/plugin/l2tvpp" "$VPP/src/plugins/l2tvpp"
 mkdir -p "$REPO/plugin/l2tvpp/test"
 ln -sfn "$REPO/test/test_l2tvpp.py" "$REPO/plugin/l2tvpp/test/test_l2tvpp.py"
 
+# Everything below is also written to build/ci-logs/dev-build-<timestamp>.log
+LOGDIR="$REPO/build/ci-logs"; mkdir -p "$LOGDIR"
+LOG="$LOGDIR/dev-build-$(date +%Y%m%d-%H%M%S).log"
+echo "log: $LOG"
 cd "$VPP"
-make build
-make test TEST=test_l2tvpp V=1
+{
+  make build
+  make test TEST=test_l2tvpp V=1
+} 2>&1 | tee "$LOG"
