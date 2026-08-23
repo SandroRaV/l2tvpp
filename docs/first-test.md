@@ -9,17 +9,48 @@ errors on the first pass; paste them back and they get fixed.
 
 ## 2. Build host
 
-A Debian 12 machine or VM with 8+ GB RAM, 40 GB disk, git, sudo. Docker only
-for the VyOS-identical build later. The Mac cannot do any of this.
+A Debian 12 or 13 machine or VM with 8+ GB RAM, 40 GB disk. Docker only for
+the VyOS-identical build later. The Mac cannot do any of this.
+
+### 2a. Bootstrap an empty Debian (once, as root)
 
 ```
-git clone git@github.com:SandroRaV/l2tvpp.git /home/<user>/l2tvpp
+apt-get update
+apt-get install -y git sudo build-essential curl ca-certificates vim
+usermod -aG sudo <user>
+```
+
+Log out and back in as `<user>` so the sudo group applies. `make install-dep`
+inside the build script uses sudo for the remaining ~60 packages (cmake,
+ninja, clang, python3 venv, libbpf, ...).
+
+### 2b. Clone
+
+Over SSH you need a deploy key or your GitHub key on the box; over HTTPS a
+personal access token. For a throwaway build VM HTTPS is simplest:
+
+```
+git clone https://github.com/SandroRaV/l2tvpp.git /home/<user>/l2tvpp
+```
+
+### 2c. Build and test
+
+```
 /home/<user>/l2tvpp/build/dev-build.sh
 ```
 
-That clones FDio VPP `stable/2510` into `build/work/vpp`, installs the build
-dependencies, symlinks `plugin/l2tvpp` into `src/plugins/`, builds a debug VPP
-and runs `make test TEST=test_l2tvpp`.
+That clones FDio VPP `stable/2510` into `/home/<user>/l2tvpp/build/work/vpp`,
+installs the build dependencies, symlinks `plugin/l2tvpp` into `src/plugins/`,
+builds a debug VPP and runs `make test TEST=test_l2tvpp`. 20-40 minutes the
+first time depending on cores; later runs with `dev-build.sh test` only
+rebuild what changed.
+
+### 2d. Docker (only for the VyOS-identical build, can wait)
+
+```
+sudo apt-get install -y docker.io
+sudo usermod -aG docker <user>
+```
 
 ## 3. Reading the result
 
