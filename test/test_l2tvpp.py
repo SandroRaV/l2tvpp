@@ -22,7 +22,7 @@ from scapy.layers.ppp import PPP, HDLC
 L2TP_PORT = 1701
 
 
-class TestL2tp2(VppTestCase):
+class TestL2tvpp(VppTestCase):
     """L2TPv2 LNS data plane"""
 
     @classmethod
