@@ -6,7 +6,6 @@ accel-ppp brings up in the kernel. See `../docs/design.md` step 4.
 | File | What |
 |---|---|
 | `l2tvppd.py` | the daemon: `/proc/net/pppol2tp` parser + `Syncd.reconcile()` over the VPP binary API (vpp_papi) |
-| `l2tvpp-install.py` | the M1 predecessor: same job by hand through `vppctl` (kept as a simple, dependency-free fallback) |
 | `l2tvppd.service` | systemd unit |
 | `accel-ppp-hooks.md` | how to trigger an immediate reconcile from accel-ppp ip-up/ip-down |
 | `test_parse.py` | pure-python unit tests for the kernel-side parsing (no VPP needed) |
@@ -42,4 +41,4 @@ make test TEST=test_l2tvpp_syncd                   # reconcile vs live VPP
 
 End-to-end against real accel-ppp on the VyOS LNS, and RADIUS interim
 accounting fed from `l2tvpp_session_dump` (see `accel-ppp-hooks.md`). Those
-need the hardware rig in `../docs/rig-test.md`.
+need the hardware rig (the l2tvpplast project).
