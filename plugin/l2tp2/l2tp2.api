@@ -1,0 +1,110 @@
+/* L2TPv2 LNS data plane plugin: binary API */
+option version = "0.1.0";
+
+import "vnet/interface_types.api";
+import "vnet/ip/ip_types.api";
+
+/** \brief Add or delete an L2TPv2 tunnel (data-plane view only)
+    @param local_ip   LNS address the LAC sends to
+    @param peer_ip    LAC address
+    @param local_port UDP port on the LNS (1701, or the ephemeral port accel-ppp chose)
+    @param peer_port  UDP port on the LAC
+    @param local_tid  tunnel id assigned by the LNS (what the LAC puts in packets to us)
+    @param peer_tid   tunnel id assigned by the LAC (what we put in packets to it)
+*/
+define l2tp2_tunnel_add_del
+{
+  u32 client_index;
+  u32 context;
+  bool is_add;
+  vl_api_address_t local_ip;
+  vl_api_address_t peer_ip;
+  u16 local_port;
+  u16 peer_port;
+  u16 local_tid;
+  u16 peer_tid;
+};
+
+define l2tp2_tunnel_add_del_reply
+{
+  u32 context;
+  i32 retval;
+  u32 tunnel_index;
+};
+
+/** \brief Add or delete a session; creates/deletes an l2tp2_session interface
+    @param tunnel_index from l2tp2_tunnel_add_del_reply
+    @param local_sid    session id assigned by the LNS
+    @param peer_sid     session id assigned by the LAC
+    @param acfc         address/control field compression negotiated (omit FF 03 on encap)
+    @param pfc          protocol field compression negotiated (1-byte protocol on encap)
+*/
+define l2tp2_session_add_del
+{
+  u32 client_index;
+  u32 context;
+  bool is_add;
+  u32 tunnel_index;
+  u16 local_sid;
+  u16 peer_sid;
+  bool acfc;
+  bool pfc;
+};
+
+define l2tp2_session_add_del_reply
+{
+  u32 context;
+  i32 retval;
+  vl_api_interface_index_t sw_if_index;
+};
+
+define l2tp2_tunnel_dump
+{
+  u32 client_index;
+  u32 context;
+  u32 tunnel_index;        /* ~0 for all */
+};
+
+define l2tp2_tunnel_details
+{
+  u32 context;
+  u32 tunnel_index;
+  vl_api_address_t local_ip;
+  vl_api_address_t peer_ip;
+  u16 local_port;
+  u16 peer_port;
+  u16 local_tid;
+  u16 peer_tid;
+  u32 n_sessions;
+};
+
+define l2tp2_session_dump
+{
+  u32 client_index;
+  u32 context;
+  vl_api_interface_index_t sw_if_index;   /* ~0 for all */
+};
+
+define l2tp2_session_details
+{
+  u32 context;
+  vl_api_interface_index_t sw_if_index;
+  u32 tunnel_index;
+  u16 local_sid;
+  u16 peer_sid;
+  bool acfc;
+  bool pfc;
+  u64 rx_packets;
+  u64 rx_bytes;
+  u64 tx_packets;
+  u64 tx_bytes;
+};
+
+/** \brief Enable/disable worker handoff by session index (for NICs whose
+    RSS cannot see the L2TP session id, e.g. ConnectX-4 Lx) */
+autoreply define l2tp2_set_handoff
+{
+  u32 client_index;
+  u32 context;
+  bool enable;
+};

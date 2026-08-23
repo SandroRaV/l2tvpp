@@ -1,0 +1,31 @@
+# M0: investigation checklist
+
+Fill in as answers are found. Each item has a decision that feeds `design.md`.
+
+## 1. VPP pppoe plugin walkthrough
+- [ ] How `pppoe_session` interfaces are created (`pppoe_add_del_session`), tx function, adjacency caching via `fib_entry_track`
+- [ ] `pppoe_decap` node: how it selects next node, how unknown sessions are handled
+- [ ] Counters: `vnet_interface_main.combined_sw_if_counters` use per session
+Decision: confirm per-session-interface model for l2tp2.
+
+## 2. VyOS pppoe offload wiring
+- [ ] Where the `vpp-cp` punt is configured (VyOS `vpp` python module, `vppctl show punt`), which node/tap receives punted frames
+- [ ] `vyos/accel-ppp-ng` source: the code that installs pppoe sessions into VPP (API calls, event hook), and whether an L2TP equivalent can be added there instead of a separate daemon
+- [ ] VPP version in the VyOS image (`vppctl show version`) and whether out-of-tree plugins load (`plugin l2tp2_plugin.so { enable }` in startup.conf)
+Decision: punt path for l2tp2-input; daemon vs accel-ppp-ng hook.
+
+## 3. Kernel side
+- [ ] For a `pppN` created by accel-ppp over L2TP: get tunnel id, session id, peer ip/port (`ip l2tp show session`, `/proc/net/pppol2tp`, genetlink `L2TP_CMD_SESSION_GET`)
+- [ ] Whether accel-ppp exposes negotiated ACFC/PFC; if not, whether `[ppp]` options can force them off
+- [ ] accel-ppp `use-ephemeral-ports`: which local UDP port the tunnel actually uses (affects tunnel local_port in VPP)
+Decision: event source and the data needed per session.
+
+## 4. LAC behaviour (mpd5, MX204, carrier)
+- [ ] Data sequencing (S bit) on data packets: on or off
+- [ ] Outer UDP checksum 0 accepted?
+- [ ] Does the LAC follow a changed LNS source port (RFC 2661 requirement)?
+Decision: whether sequencing support is needed before M3.
+
+## 5. Build environment
+- [ ] VPP build host (Debian 12, `make install-dep`, `make build`) with the same VPP version as the target
+- [ ] Test VPP with a ConnectX-4 Lx in a plain Debian host first (mlx5 PMD, rdma-core), then the VyOS build
