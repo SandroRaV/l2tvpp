@@ -9,8 +9,10 @@
 # not configured yet.
 [Unit]
 Description=l2tvpp sync daemon (VPP owns the L2TP data plane)
+# Order after VPP but do NOT pull it up: on a box with no `set vpp` config
+# VPP should stay down, and the daemon just waits (connect retry) rather than
+# force-starting VPP.
 After=vpp.service
-Wants=vpp.service
 
 [Service]
 Type=simple

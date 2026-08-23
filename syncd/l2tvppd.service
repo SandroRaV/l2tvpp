@@ -6,8 +6,8 @@
 # outside-address, then: systemctl enable --now l2tvppd
 [Unit]
 Description=l2tvpp sync daemon (mirror kernel L2TP/PPP sessions into VPP)
+# order after VPP but do not force it up (see build/vyos-image/l2tvppd.service)
 After=vpp.service accel-ppp.service
-Wants=vpp.service
 
 [Service]
 Type=simple
