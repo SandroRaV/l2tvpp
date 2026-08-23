@@ -76,16 +76,16 @@ typedef CLIB_PACKED (struct {
   u16 protocol;
 }) l2tvpp_ppp_hdr_t;
 
-/* decap lookup key: peer ip4, peer port, tunnel id, session id */
+/* decap lookup key: the LNS-assigned (local) tunnel id + session id, which
+ * RFC 2661 already makes unique on this LNS, so the outer IP/port is not
+ * needed (and reading it post udp-local is fragile). */
 typedef union
 {
   struct
   {
-    u32 peer_ip4;
-    u16 peer_port;
     u16 local_tid;
     u16 local_sid;
-    u16 pad[3];
+    u16 pad[6];
   };
   u64 as_u64[2];
 } l2tvpp_session_key_t;
@@ -112,13 +112,10 @@ u8 *format_l2tvpp_tunnel (u8 * s, va_list * args);
 u8 *format_l2tvpp_session (u8 * s, va_list * args);
 
 static_always_inline void
-l2tvpp_make_key (l2tvpp_session_key_t * k, u32 peer_ip4, u16 peer_port,
-		 u16 local_tid, u16 local_sid)
+l2tvpp_make_key (l2tvpp_session_key_t * k, u16 local_tid, u16 local_sid)
 {
   k->as_u64[0] = 0;
   k->as_u64[1] = 0;
-  k->peer_ip4 = peer_ip4;
-  k->peer_port = peer_port;
   k->local_tid = local_tid;
   k->local_sid = local_sid;
 }

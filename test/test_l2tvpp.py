@@ -19,6 +19,7 @@ from scapy.layers.inet import IP, UDP
 from scapy.layers.l2tp import L2TP
 from scapy.layers.ppp import PPP, HDLC
 from vpp_ip_route import VppIpRoute, VppRoutePath
+from vpp_neighbor import VppNeighbor
 
 L2TP_PORT = 1701
 
@@ -34,6 +35,12 @@ class TestL2tvpp(VppTestCase):
             i.admin_up()
             i.config_ip4()
             i.resolve_arp()
+        # static neighbor for the LAC: its MAC is known, and this keeps the
+        # encap midchain stacked on a complete adjacency (no ARP aging)
+        cls.lac_nbr = VppNeighbor(cls, cls.pg0.sw_if_index,
+                                  cls.pg0.remote_mac, cls.pg0.remote_ip4,
+                                  is_static=True)
+        cls.lac_nbr.add_vpp_config()
         cls.lac = cls.pg0        # access side, LAC lives here
         cls.core = cls.pg1       # uplink
 

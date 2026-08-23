@@ -143,6 +143,9 @@ l2tvpp_fixup (vlib_main_t * vm, const ip_adjacency_t * adj,
   udp_header_t *udp = (udp_header_t *) (ip + 1);
   u16 len = vlib_buffer_length_in_chain (vm, b);
 
+  /* the outer IP is ours, not the subscriber's: don't let ip4-rewrite
+   * TTL-decrement it */
+  b->flags |= VNET_BUFFER_F_LOCALLY_ORIGINATED;
   ip->length = clib_host_to_net_u16 (len);
   ip->checksum = ip4_header_checksum (ip);
   udp->length = clib_host_to_net_u16 (len - sizeof (*ip));
@@ -172,15 +175,11 @@ l2tvpp_update_adj (vnet_main_t * vnm, u32 sw_if_index, adj_index_t ai)
   adj_midchain_delegate_stack (ai, t->encap_fib_index, &pfx);
 }
 
-/* Packets only reach the device tx function if something bypasses the
- * adjacency (e.g. l2 xconnect). Not supported: drop. */
-VNET_DEVICE_CLASS_TX_FN (l2tvpp_device_class) (vlib_main_t * vm,
-					       vlib_node_runtime_t * node,
-					       vlib_frame_t * frame)
-{
-  vlib_buffer_free (vm, vlib_frame_vector_args (frame), frame->n_vectors);
-  return frame->n_vectors;
-}
+/* No VNET_DEVICE_CLASS_TX_FN on purpose: like ipip/gre tunnel interfaces,
+ * transit traffic leaves through the midchain adjacency's stacked next_dpo
+ * (ip4-midchain -> adj-midchain-tx -> peer forwarding). Defining a device tx
+ * function would instead route ip4-midchain into interface-N-output and drop
+ * the encapsulated packet. */
 
 static clib_error_t *
 l2tvpp_admin_up_down (vnet_main_t * vnm, u32 hw_if_index, u32 flags)
@@ -274,8 +273,7 @@ l2tvpp_session_add_del (l2tvpp_main_t * lm, u32 tunnel_index,
     return VNET_API_ERROR_NO_SUCH_ENTRY;
   t = pool_elt_at_index (lm->tunnels, tunnel_index);
 
-  l2tvpp_make_key (&key, t->peer_ip.ip4.as_u32, t->peer_port, t->local_tid,
-		   local_sid);
+  l2tvpp_make_key (&key, t->local_tid, local_sid);
   kv.key[0] = key.as_u64[0];
   kv.key[1] = key.as_u64[1];
 
@@ -298,6 +296,18 @@ l2tvpp_session_add_del (l2tvpp_main_t * lm, u32 tunnel_index,
 						   sess - lm->sessions);
       vnet_hw_interface_t *hi = vnet_get_hw_interface (vnm, sess->hw_if_index);
       sess->sw_if_index = hi->sw_if_index;
+
+      /* virtual interface: no carrier of its own, so declare link up now
+       * or the midchain IP-stack falls back to the (dropping) tx node */
+      vnet_hw_interface_set_flags (vnm, sess->hw_if_index,
+				   VNET_HW_INTERFACE_FLAG_LINK_UP);
+
+      /* route the L3 output of this interface into the midchain tx node, so
+       * an encapped packet goes ip4-midchain -> tunnel-output -> stacked
+       * peer forwarding, exactly like ipip/gre. Without this the midchain's
+       * next node resolves to local0-output and the packet is dropped. */
+      vnet_set_interface_l3_output_node (lm->vlib_main, sess->sw_if_index,
+					 (u8 *) "tunnel-output");
 
       vec_validate_init_empty (lm->session_index_by_sw_if_index,
 			       sess->sw_if_index, ~0);
@@ -327,6 +337,7 @@ l2tvpp_session_add_del (l2tvpp_main_t * lm, u32 tunnel_index,
   vnet_sw_interface_set_flags (vnm, sess->sw_if_index, 0);
   clib_bihash_add_del_16_8 (&lm->session_by_key, &kv, 0);
   lm->session_index_by_sw_if_index[sess->sw_if_index] = ~0;
+  vnet_reset_interface_l3_output_node (lm->vlib_main, sess->sw_if_index);
   vnet_delete_hw_interface (vnm, sess->hw_if_index);
   t->n_sessions--;
   pool_put (lm->sessions, sess);

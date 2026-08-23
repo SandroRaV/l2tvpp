@@ -97,17 +97,12 @@ VLIB_NODE_FN (l2tvpp_input_node) (vlib_main_t * vm,
   while (n_left > 0)
     {
       vlib_buffer_t *b0 = b[0];
-      ip4_header_t *ip0;
-      udp_header_t *udp0;
       u8 *cur;
       u16 flags, tid, sid, ppp_proto = 0;
       u32 session_index = ~0, error = L2TVPP_INPUT_ERROR_DECAP;
       u32 next0;
 
-      /* udp-local leaves current_data at the L2TP header; the outer
-       * headers are reachable through the recorded offsets */
-      ip0 = (ip4_header_t *) (b0->data + vnet_buffer (b0)->l3_hdr_offset);
-      udp0 = (udp_header_t *) (b0->data + vnet_buffer (b0)->l4_hdr_offset);
+      /* udp-local leaves current_data at the L2TP header */
       cur = vlib_buffer_get_current (b0);
 
       if (PREDICT_FALSE (b0->current_length < 6))
@@ -119,15 +114,21 @@ VLIB_NODE_FN (l2tvpp_input_node) (vlib_main_t * vm,
 
       flags = clib_net_to_host_u16 (*(u16 *) cur);
 
-      if (PREDICT_FALSE ((flags & L2TVPP_HDR_VER) != 2
-			 || (flags & (L2TVPP_HDR_S | L2TVPP_HDR_O))))
+      if (PREDICT_FALSE ((flags & L2TVPP_HDR_VER) != 2))
 	{
 	  error = L2TVPP_INPUT_ERROR_PUNT_UNSUPPORTED;
 	  goto punt;
 	}
+      /* T must be tested before S/O: control messages always carry S, so
+       * checking S first would mislabel them as "sequenced" */
       if (PREDICT_FALSE (flags & L2TVPP_HDR_T))
 	{
 	  error = L2TVPP_INPUT_ERROR_PUNT_CONTROL;
+	  goto punt;
+	}
+      if (PREDICT_FALSE (flags & (L2TVPP_HDR_S | L2TVPP_HDR_O)))
+	{
+	  error = L2TVPP_INPUT_ERROR_PUNT_UNSUPPORTED;
 	  goto punt;
 	}
 
@@ -141,8 +142,7 @@ VLIB_NODE_FN (l2tvpp_input_node) (vlib_main_t * vm,
       {
 	l2tvpp_session_key_t key;
 	clib_bihash_kv_16_8_t kv;
-	l2tvpp_make_key (&key, ip0->src_address.as_u32,
-			 clib_net_to_host_u16 (udp0->src_port), tid, sid);
+	l2tvpp_make_key (&key, tid, sid);
 	kv.key[0] = key.as_u64[0];
 	kv.key[1] = key.as_u64[1];
 	if (PREDICT_FALSE (clib_bihash_search_inline_16_8
