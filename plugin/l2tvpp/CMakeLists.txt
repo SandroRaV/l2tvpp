@@ -7,6 +7,7 @@ add_vpp_plugin(l2tvpp
   l2tvpp_api.c
   l2tvpp_cli.c
   node.c
+  handoff.c
 
   API_FILES
   l2tvpp.api

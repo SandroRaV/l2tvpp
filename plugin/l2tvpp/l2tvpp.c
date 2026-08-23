@@ -368,6 +368,29 @@ l2tvpp_session_add_del (l2tvpp_main_t * lm, u32 tunnel_index,
 }
 
 /* --------------------------------------------------------------------
+ * worker handoff (spread decap across cores by session; see handoff.c)
+ */
+int
+l2tvpp_set_handoff (l2tvpp_main_t * lm, u8 enable)
+{
+  vlib_main_t *vm = lm->vlib_main;
+
+  enable = enable ? 1 : 0;
+  if (enable == lm->handoff_enabled)
+    return 0;
+
+  vlib_worker_thread_barrier_sync (vm);
+  /* re-point udp/1701 at the handoff node (enable) or straight at the
+   * processing node (disable); the barrier makes the swap safe under load */
+  udp_register_dst_port (vm, L2TVPP_UDP_PORT,
+			 enable ? l2tvpp_handoff_node.index
+			 : l2tvpp_input_node.index, 1);
+  lm->handoff_enabled = enable;
+  vlib_worker_thread_barrier_release (vm);
+  return 0;
+}
+
+/* --------------------------------------------------------------------
  * init
  */
 static clib_error_t *
@@ -379,6 +402,12 @@ l2tvpp_init (vlib_main_t * vm)
   lm->vnet_main = vnet_get_main ();
   clib_bihash_init_16_8 (&lm->session_by_key, "l2tvpp sessions",
 			 64 * 1024, 32 << 20);
+
+  /* frame queue feeding l2tvpp-input, used by the handoff node to move
+   * buffers to the worker chosen for their session */
+  lm->handoff_frame_queue_index =
+    vlib_frame_queue_main_init (l2tvpp_input_node.index, 0);
+  lm->handoff_enabled = 0;
 
   /* take over UDP 1701 from udp-local; non-data packets are handed back
    * to the punt path by l2tvpp-input */

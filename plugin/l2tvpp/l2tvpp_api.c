@@ -163,13 +163,9 @@ vl_api_l2tvpp_set_handoff_t_handler (vl_api_l2tvpp_set_handoff_t * mp)
 {
   l2tvpp_main_t *lm = &l2tvpp_main;
   vl_api_l2tvpp_set_handoff_reply_t *rmp;
-  int rv = 0;
+  int rv;
 
-  /* M3: handoff node not implemented yet */
-  if (mp->enable)
-    rv = VNET_API_ERROR_UNIMPLEMENTED;
-  else
-    lm->handoff_enabled = 0;
+  rv = l2tvpp_set_handoff (lm, mp->enable);
 
   REPLY_MACRO (VL_API_L2TVPP_SET_HANDOFF_REPLY);
 }

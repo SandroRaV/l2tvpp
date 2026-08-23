@@ -213,3 +213,84 @@ class TestL2tvppAddDel(VppTestCase):
 
 if __name__ == "__main__":
     unittest.main(testRunner=VppTestRunner)
+
+
+class TestL2tvppHandoff(VppTestCase):
+    """l2tvpp worker handoff: with handoff on and 2 workers, sessions still
+    decap/encap correctly (the handoff node picks a worker by session and
+    enqueues to l2tvpp-input there)."""
+
+    vpp_worker_count = 2
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.create_pg_interfaces(range(2))
+        for i in cls.pg_interfaces:
+            i.admin_up()
+            i.config_ip4()
+            i.resolve_arp()
+        cls.vapi.ip_neighbor_add_del(
+            cls.pg0.sw_if_index, cls.pg0.remote_mac, cls.pg0.remote_ip4,
+            is_add=1, flags=1)
+        # two sessions in one tunnel, so the two workers each get one
+        cls.tunnel = cls.vapi.l2tvpp_tunnel_add_del(
+            is_add=True, local_ip=cls.pg0.local_ip4, peer_ip=cls.pg0.remote_ip4,
+            local_port=L2TP_PORT, peer_port=L2TP_PORT,
+            local_tid=LOCAL_TID, peer_tid=PEER_TID).tunnel_index
+        cls.subs = {}
+        for lsid, psid, sub in ((1000, 2000, "10.200.0.5"),
+                                (1001, 2001, "10.200.0.6")):
+            swif = cls.vapi.l2tvpp_session_add_del(
+                is_add=True, tunnel_index=cls.tunnel, local_sid=lsid,
+                peer_sid=psid, acfc=False, pfc=False).sw_if_index
+            path = {"sw_if_index": swif, "table_id": 0, "rpf_id": 0,
+                    "weight": 1, "preference": 0, "next_hop_id": 0xFFFFFFFF,
+                    "proto": 0, "type": 0, "flags": 0,
+                    "nh": {"address": {"ip4": "0.0.0.0"}},
+                    "n_labels": 0, "label_stack": [{}] * 16}
+            cls.vapi.ip_route_add_del(
+                is_add=1, is_multipath=0,
+                route={"table_id": 0, "prefix": sub + "/32", "n_paths": 1,
+                       "paths": [path]})
+            cls.subs[lsid] = (psid, sub)
+        cls.vapi.l2tvpp_set_handoff(enable=True)
+
+    def l2tp_data(self, lsid, inner):
+        from scapy.layers.ppp import HDLC
+        return (Ether(src=self.pg0.remote_mac, dst=self.pg0.local_mac)
+                / IP(src=self.pg0.remote_ip4, dst=self.pg0.local_ip4)
+                / UDP(sport=L2TP_PORT, dport=L2TP_PORT)
+                / L2TP(hdr="", tunnel_id=LOCAL_TID, session_id=lsid)
+                / HDLC() / PPP(proto=0x0021) / inner)
+
+    def test_handoff_decap_both_sessions(self):
+        """upstream data for both sessions decaps and forwards under handoff"""
+        pkts = []
+        for lsid, (_psid, sub) in self.subs.items():
+            inner = IP(src=sub, dst=self.pg1.remote_ip4) / UDP(sport=1, dport=2)
+            pkts += [self.l2tp_data(lsid, inner)] * 8
+        self.pg_enable_capture(self.pg_interfaces)
+        self.pg0.add_stream(pkts)
+        self.pg_start()
+        rx = self.pg1.get_capture(16)
+        seen = set()
+        for p in rx:
+            self.assertFalse(p.haslayer(L2TP))
+            seen.add(p[IP].src)
+        self.assertEqual(seen, {s for _p, s in self.subs.values()})
+        # the handoff node must actually have run
+        self.assertIn("l2tvpp-handoff", self.vapi.cli("show runtime"))
+
+    def test_handoff_encap(self):
+        """downstream encap still works with handoff enabled"""
+        _psid, sub = self.subs[1000]
+        p = (Ether(src=self.pg1.remote_mac, dst=self.pg1.local_mac)
+             / IP(src=self.pg1.remote_ip4, dst=sub) / UDP(sport=5678, dport=1234))
+        self.pg_enable_capture(self.pg_interfaces)
+        self.pg1.add_stream([p] * 6)
+        self.pg_start()
+        rx = self.pg0.get_capture(6)
+        for r in rx:
+            self.assertEqual(r[L2TP].session_id, 2000)
+            self.assertEqual(r[PPP][IP].dst, sub)

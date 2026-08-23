@@ -20,9 +20,14 @@ from scapy.layers.inet import IP, UDP
 from scapy.layers.l2tp import L2TP
 from scapy.layers.ppp import PPP
 
-# the test file is symlinked into vpp/test/; follow the link to the real repo
-sys.path.insert(0, os.path.join(
-    os.path.dirname(os.path.realpath(__file__)), "..", "syncd"))
+# find the syncd dir whether the test is symlinked into vpp/test/ (dev loop:
+# ../syncd is the repo's) or copied there by CI (../syncd sits beside test/)
+_here = os.path.dirname(os.path.realpath(__file__))
+for _cand in (os.path.join(_here, "..", "syncd"),
+              os.path.join(os.path.dirname(__file__), "..", "syncd")):
+    if os.path.exists(os.path.join(_cand, "l2tvppd.py")):
+        sys.path.insert(0, _cand)
+        break
 import l2tvppd  # noqa: E402
 
 L2TP_PORT = 1701

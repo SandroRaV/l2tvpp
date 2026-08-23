@@ -15,7 +15,7 @@ L2TPv2 LNS data plane for VPP, so an LNS on commodity hardware forwards beyond
 
 ## Testing tiers
 
-1. **Unit, no hardware**: `make test TEST=test_l2tvpp` inside the VPP tree the
+1. **Unit, no hardware**: `make test TEST=test_l2tvpp,test_l2tvpp_syncd` inside the VPP tree the
    build script produces (`build/work/vyos-build/scripts/package-build/vpp/vpp/`).
    Runs in CI.
 2. **VM lab**: VyOS ISO from `build/build-iso.sh` in KVM (virtio NICs), BNG

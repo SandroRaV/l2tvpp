@@ -34,16 +34,22 @@ fi
 "${DOCKER_RUN[@]}" bash -c '
   set -euo pipefail
   cd /vpp
+  # in-tree the plugin
   rm -rf src/plugins/l2tvpp
   cp -r /src/plugin/l2tvpp src/plugins/l2tvpp
-  mkdir -p src/plugins/l2tvpp/test
-  cp /src/test/test_l2tvpp.py src/plugins/l2tvpp/test/
+  # the syncd daemon (imported by its make-test) next to test/ as ../syncd,
+  # and all test modules into test/
+  rm -rf syncd && cp -r /src/syncd syncd
+  mkdir -p test
+  cp /src/test/test_l2tvpp.py /src/test/test_l2tvpp_syncd.py test/
+  echo "== parser unit test (no VPP)"
+  python3 /src/syncd/test_parse.py
   echo "== build (incremental, plugin only)"
   make build
-  echo "== checkstyle"
-  make checkstyle-all 2>/dev/null || extras/scripts/checkstyle.sh || true
-  echo "== test"
-  make test TEST=test_l2tvpp V=1
+  echo "== checkstyle (plugin C only; non-fatal)"
+  extras/scripts/checkstyle.sh 2>/dev/null || true
+  echo "== make test"
+  make test TEST=test_l2tvpp,test_l2tvpp_syncd V=1
 ' 2>&1 | tee "$LOGDIR/$STAMP-$GITREV.log"
 
 echo "log: $LOGDIR/$STAMP-$GITREV.log"

@@ -105,11 +105,13 @@ typedef struct
 
 extern l2tvpp_main_t l2tvpp_main;
 extern vlib_node_registration_t l2tvpp_input_node;
+extern vlib_node_registration_t l2tvpp_handoff_node;
 extern vnet_hw_interface_class_t l2tvpp_hw_class;
 extern vnet_device_class_t l2tvpp_device_class;
 
 u8 *format_l2tvpp_tunnel (u8 * s, va_list * args);
 u8 *format_l2tvpp_session (u8 * s, va_list * args);
+int l2tvpp_set_handoff (l2tvpp_main_t * lm, u8 enable);
 
 static_always_inline void
 l2tvpp_make_key (l2tvpp_session_key_t * k, u16 local_tid, u16 local_sid)

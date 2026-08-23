@@ -179,7 +179,7 @@ kernel `pppN` counters stop. Benchmark single worker, one session.
 events, restart reconciliation, IPv6 and PD routes. Benchmark hundreds of
 sessions, session churn, and verify LCP echo survives.
 
-**M3, scale (1-2 weeks)**: worker handoff, multi-worker benchmark on the
+**M3, scale (1-2 weeks)** [handoff DONE 2026-08-23: `handoff.c` (l2tvpp-handoff node, session%%n_workers, frame-queue to l2tvpp-input), `l2tvpp handoff on|off` CLI + l2tvpp_set_handoff API; tested with 2 workers in TestL2tvppHandoff. Multi-worker throughput benchmark still needs the EPYC/ConnectX-4 rig]: worker handoff, multi-worker benchmark on the
 EPYC with the ConnectX-4 Lx; measure against the kernel+XDP baseline
 (`l2tp-xdp/`) and the 6WIND numbers in `bench/comparison-25g.md`. Then the
 E810 RSS variant if a card is available.

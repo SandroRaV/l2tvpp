@@ -172,3 +172,39 @@ VLIB_CLI_COMMAND (show_l2tvpp_session_command, static) = {
   .short_help = "show l2tvpp session",
   .function = show_l2tvpp_session_cli,
 };
+
+static clib_error_t *
+l2tvpp_handoff_cli (vlib_main_t * vm, unformat_input_t * input,
+		    vlib_cli_command_t * cmd)
+{
+  l2tvpp_main_t *lm = &l2tvpp_main;
+  unformat_input_t _line, *line = &_line;
+  u8 enable = 1;
+
+  if (unformat_user (input, unformat_line_input, line))
+    {
+      while (unformat_check_input (line) != UNFORMAT_END_OF_INPUT)
+	{
+	  if (unformat (line, "on") || unformat (line, "enable"))
+	    enable = 1;
+	  else if (unformat (line, "off") || unformat (line, "disable"))
+	    enable = 0;
+	  else
+	    {
+	      unformat_free (line);
+	      return clib_error_return (0, "unknown input");
+	    }
+	}
+      unformat_free (line);
+    }
+  l2tvpp_set_handoff (lm, enable);
+  vlib_cli_output (vm, "l2tvpp worker handoff %s (%d workers)",
+		   lm->handoff_enabled ? "on" : "off", vlib_num_workers ());
+  return 0;
+}
+
+VLIB_CLI_COMMAND (l2tvpp_handoff_command, static) = {
+  .path = "l2tvpp handoff",
+  .short_help = "l2tvpp handoff [on|off]",
+  .function = l2tvpp_handoff_cli,
+};
