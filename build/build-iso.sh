@@ -29,6 +29,6 @@ install -m 0644 "$REPO"/build/vyos-image/l2tvppd.service "$INC/lib/systemd/syste
 
 docker run --rm $TTY -v "$WORK/vyos-build:/vyos" -w /vyos --privileged \
   "vyos/vyos-build:$BRANCH" \
-  bash -c 'sudo make clean && sudo ./build-vyos-image generic --architecture amd64 --build-by l2tvpp --build-type release --version "$(date +%Y%m%d)-l2tvpp"'
+  bash -c 'sudo make clean && sudo ./build-vyos-image generic --architecture amd64 --build-by l2tvpp --build-type release --version "$(date +%Y%m%d-%H%M)-l2tvpp"'
 
 ls -la "$WORK"/vyos-build/build/*.iso
