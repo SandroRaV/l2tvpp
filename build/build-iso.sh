@@ -6,6 +6,7 @@
 #
 #   /path/to/l2tvpp/build/build-iso.sh [vyos-build-branch]
 set -euo pipefail
+TTY=$([ -t 0 ] && echo -it || echo -i)
 
 BRANCH="${1:-current}"
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -16,7 +17,7 @@ ls "$REPO"/build/out/*.deb >/dev/null 2>&1 || { echo "no debs in build/out"; exi
 mkdir -p "$WORK/vyos-build/packages"
 cp "$REPO"/build/out/*.deb "$WORK/vyos-build/packages/"
 
-docker run --rm -it -v "$WORK/vyos-build:/vyos" -w /vyos --privileged \
+docker run --rm $TTY -v "$WORK/vyos-build:/vyos" -w /vyos --privileged \
   "vyos/vyos-build:$BRANCH" \
   bash -c 'sudo make clean && sudo ./build-vyos-image generic --architecture amd64 --build-by l2tvpp --build-type release --version "$(date +%Y%m%d)-l2tvpp"'
 

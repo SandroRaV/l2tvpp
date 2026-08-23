@@ -10,6 +10,7 @@
 # Output: /path/to/l2tvpp/build/out/*.deb  (vpp, vpp-plugin-core, ...)
 # Takes 30-60 min the first time (full VPP build).
 set -euo pipefail
+TTY=$([ -t 0 ] && echo -it || echo -i)
 
 BRANCH="${1:-current}"
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -25,7 +26,7 @@ fi
 cp "$REPO/build/package.toml" "$WORK/vyos-build/scripts/package-build/vpp/package.toml"
 
 docker pull "vyos/vyos-build:$BRANCH"
-docker run --rm -it \
+docker run --rm $TTY \
   -v "$WORK/vyos-build:/vyos" \
   -v "$REPO:/l2tvpp:ro" \
   -w /vyos/scripts/package-build/vpp \
