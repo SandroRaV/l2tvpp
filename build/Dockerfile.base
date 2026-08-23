@@ -1,0 +1,34 @@
+# Copyright (c) 2026 Default Gateway GmbH
+# SPDX-License-Identifier: Apache-2.0
+#
+# Base image: Debian 12 with FDio VPP stable/2510 already built (debug) and
+# the make-test venv prepared. Rebuilt only when VPP_BRANCH/VPP_COMMIT or the
+# deps change. Every plugin build/test starts from this image, so each run is
+# a clean build of the plugin against an unchanged VPP tree.
+#
+#   docker build -f build/Dockerfile.base -t l2tvpp-base:2510 \
+#       --build-arg VPP_COMMIT=$(git ls-remote https://github.com/FDio/vpp stable/2510 | cut -c1-12) build/
+FROM debian:12
+
+ARG VPP_BRANCH=stable/2510
+ARG VPP_COMMIT=HEAD
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      git sudo build-essential ca-certificates curl python3 python3-venv \
+      iproute2 iputils-ping procps \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /vpp
+RUN git clone -b ${VPP_BRANCH} --single-branch https://github.com/FDio/vpp . \
+    && git checkout ${VPP_COMMIT} \
+    && make UNATTENDED=yes install-dep install-ext-deps \
+    && rm -rf /var/lib/apt/lists/*
+
+# Full debug build once; plugin builds later are incremental on top of it.
+RUN make build
+
+# Prepare the test venv so `make test` does not need network later.
+RUN make test-dep || true
+
+LABEL org.opencontainers.image.description="VPP ${VPP_BRANCH} build tree for l2tvpp CI"

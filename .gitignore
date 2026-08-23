@@ -5,3 +5,4 @@ xdp/l2tp_steer
 __pycache__/
 *.pyc
 .DS_Store
+build/ci-logs/

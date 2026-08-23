@@ -1,0 +1,21 @@
+# Runs on a self-hosted runner (the Debian build VM) that has docker and the
+# l2tvpp-base:2510 image. GitHub-hosted runners would need to rebuild VPP
+# every time (30-60 min) and cannot hold a multi-GB base image.
+name: plugin build + make test
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+      - name: clean build + test in base container
+        run: ./build/ci-test.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ci-log
+          path: build/ci-logs/*.log

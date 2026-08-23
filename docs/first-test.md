@@ -90,3 +90,31 @@ the VyOS LNS and the rig test from `docs/design.md` M1: BNG Blaster through
 mpd5, session up in accel-ppp, install the same session by hand with
 `vppctl l2tvpp ...`, watch `show l2tvpp session` counters move and the
 kernel `pppN` counters stop.
+
+## 6. Repeatable clean builds
+
+Once the first build has been through the compiler, switch to the container
+flow so every run is a clean plugin build against an unchanged VPP tree:
+
+```
+sudo apt-get install -y docker.io && sudo usermod -aG docker <user>   # re-login
+cd /home/<user>/l2tvpp
+docker build -f build/Dockerfile.base -t l2tvpp-base:2510 build/        # once, 30-60 min
+./build/ci-test.sh                                                       # every time, minutes
+```
+
+`build/ci-test.sh` starts a throwaway container from `l2tvpp-base:2510`,
+copies the plugin in, runs the incremental `make build` (only the plugin
+compiles), `checkstyle`, and `make test TEST=test_l2tvpp`. The log lands in
+`build/ci-logs/<timestamp>-<gitrev>.log`. `./build/ci-test.sh shell` gives
+an interactive container for poking at a failure.
+
+Rebuild the base image only when bumping VPP (`--build-arg VPP_COMMIT=...`)
+or when `install-dep` changes; tag it with the VPP version so old logs stay
+comparable.
+
+For every push: register the build VM as a GitHub Actions self-hosted runner
+(repo Settings > Actions > Runners, follow the generated commands) and
+`.github/workflows/ci.yml` runs the same script automatically and uploads
+the log. GitHub-hosted runners are not used on purpose: they would rebuild
+VPP on every run.
