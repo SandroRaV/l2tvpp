@@ -1,4 +1,6 @@
 #!/bin/bash
+# Copyright (c) 2026 Sandro (ravana.me)
+# SPDX-License-Identifier: Apache-2.0
 # Build a VyOS ISO that includes the .debs from build/out (our VPP build with
 # l2tp2). vyos-build picks up any .deb placed in its packages/ directory.
 #

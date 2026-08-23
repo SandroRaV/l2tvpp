@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Sandro (ravana.me)
+# SPDX-License-Identifier: Apache-2.0
 # Build as an out-of-tree VPP plugin, or drop into src/plugins/l2tp2/
 add_vpp_plugin(l2tp2
   SOURCES

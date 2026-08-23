@@ -32,3 +32,14 @@ L2TPv2 LNS data plane for VPP, so an LNS on commodity hardware forwards beyond
 
 VPP version tracking: VyOS `current` builds FDio `stable/2510`; `build/package.toml`
 must be re-diffed against `package.toml.vyos-orig` whenever VyOS bumps it.
+
+## License
+
+- Everything except `xdp/` is **Apache-2.0** (`LICENSE`), the same license as
+  VPP and the VyOS VPP patches, so the plugin can go upstream unchanged. Source
+  files carry `SPDX-License-Identifier: Apache-2.0`.
+- `xdp/` is **GPL-2.0** (`xdp/LICENSE`): the BPF program uses GPL-only kernel
+  helpers and declares `"GPL"` to the verifier; the loader links libbpf
+  (LGPL-2.1 OR BSD-2-Clause).
+- Contributions use the Developer Certificate of Origin (`git commit -s`),
+  as required by FD.io and VyOS.

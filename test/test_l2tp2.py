@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Sandro (ravana.me)
+# SPDX-License-Identifier: Apache-2.0
 """
 VPP make-test suite for the l2tp2 plugin (runs under vpp/test with scapy,
 no NIC needed). Copied to src/plugins/l2tp2/test/ by build/package.toml.

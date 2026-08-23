@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
+// Copyright (c) 2026 Sandro (ravana.me)
 /*
  * l2tp_steer: XDP program that spreads incoming L2TPv2 data packets over
  * CPU cores by tunnel ID + session ID, using a CPUMAP redirect.

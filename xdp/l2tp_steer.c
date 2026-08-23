@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
+// Copyright (c) 2026 Sandro (ravana.me)
 /*
  * l2tp_steer loader: attaches l2tp_steer.bpf.o to an interface, fills the
  * CPUMAP with the chosen cores, pins the maps under /sys/fs/bpf/l2tp_steer
