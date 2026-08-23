@@ -45,9 +45,21 @@ commands; see `vyos-vpp-pppoe-connectx-5019d-4c.md` step 4 in the rig notes):
 
 ```
 sudo dpkg -i /tmp/vpp-plugin-core_*.deb
+# VyOS only loads an allowlist of VPP plugins, so enable l2tvpp in the
+# template (persists within this image install):
+sudo sed -i '/plugin pppoe_plugin.so { enable }/a\    plugin l2tvpp_plugin.so { enable }' \
+  /usr/share/vyos/templates/vpp/startup.conf.j2
+sudo sed -i '/plugin pppoe_plugin.so { enable }/a\    plugin l2tvpp_plugin.so { enable }' \
+  /run/vpp/vpp.conf 2>/dev/null || true
 sudo systemctl restart vpp
 vppctl show plugins | grep l2tvpp        # l2tvpp_plugin.so must be listed
 ```
+
+> VyOS renders `/run/vpp/vpp.conf` from
+> `/usr/share/vyos/templates/vpp/startup.conf.j2` on every `vpp` commit, so
+> editing the template is what makes the enable stick; editing `vpp.conf`
+> directly only lasts until the next commit/reboot. The baked-ISO path (2)
+> does this for you via the build hook.
 
 Lost on the next `add system image` upgrade - fine for iterating. For a
 persistent install use path 2.
@@ -63,6 +75,12 @@ ls build/work/vyos-build/build/*.iso
 Install that ISO the normal way (`add system image <iso>` from a running
 VyOS, or a fresh install). The plugin is part of the image's VPP and
 survives upgrades within that image.
+
+`build-iso.sh` also bakes in a chroot hook
+(`build/vyos-hooks/50-l2tvpp-enable-vpp-plugin.chroot`) that adds
+`plugin l2tvpp_plugin.so { enable }` to VyOS's VPP `startup.conf` template -
+necessary because VyOS uses `plugin default { disable }` plus an allowlist,
+so an un-listed plugin ships but never loads.
 
 Upstreaming later: the clean way to get l2tvpp into stock VyOS is a patch to
 `vyos-vpp-patches` (the same mechanism VyOS uses for its own VPP changes) or

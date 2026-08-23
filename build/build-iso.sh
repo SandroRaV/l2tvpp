@@ -17,6 +17,10 @@ ls "$REPO"/build/out/*.deb >/dev/null 2>&1 || { echo "no debs in build/out"; exi
 mkdir -p "$WORK/vyos-build/packages"
 cp "$REPO"/build/out/*.deb "$WORK/vyos-build/packages/"
 
+# bake the l2tvpp VPP-plugin-enable hook into the image build
+install -m 0755 "$REPO"/build/vyos-hooks/*.chroot \
+  "$WORK/vyos-build/data/live-build-config/hooks/live/"
+
 docker run --rm $TTY -v "$WORK/vyos-build:/vyos" -w /vyos --privileged \
   "vyos/vyos-build:$BRANCH" \
   bash -c 'sudo make clean && sudo ./build-vyos-image generic --architecture amd64 --build-by l2tvpp --build-type release --version "$(date +%Y%m%d)-l2tvpp"'

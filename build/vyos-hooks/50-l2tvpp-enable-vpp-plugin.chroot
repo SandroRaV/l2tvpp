@@ -1,0 +1,15 @@
+#!/bin/sh
+# Copyright (c) 2026 Default Gateway GmbH
+# SPDX-License-Identifier: Apache-2.0
+#
+# Enable l2tvpp_plugin.so in VyOS's generated VPP startup.conf. VyOS ships
+# "plugin default { disable }" plus an explicit allowlist in
+# /usr/share/vyos/templates/vpp/startup.conf.j2, so without this the plugin
+# is present but never loaded. Runs in the image chroot after vyos-1x is
+# installed. Idempotent.
+set -e
+TPL=/usr/share/vyos/templates/vpp/startup.conf.j2
+if [ -f "$TPL" ] && ! grep -q 'l2tvpp_plugin.so' "$TPL"; then
+    sed -i '/plugin pppoe_plugin.so { enable }/a\    plugin l2tvpp_plugin.so { enable }' "$TPL"
+    echo "I: l2tvpp: enabled l2tvpp_plugin.so in $TPL"
+fi
