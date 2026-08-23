@@ -52,6 +52,11 @@ sudo apt-get install -y docker.io
 sudo usermod -aG docker <user>
 ```
 
+Note: `make test` builds a second, separate VPP tree (release flags, all
+CPU variants) the first time it runs, so the first `make test` costs another
+full compile (~20 min on 8 cores) before any test output appears. Later runs
+are incremental.
+
 ## 3. Reading the result
 
 - Compiler error: fix, rerun `/home/<user>/l2tvpp/build/dev-build.sh test`.
