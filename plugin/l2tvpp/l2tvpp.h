@@ -21,6 +21,8 @@
 #include <vnet/vnet.h>
 #include <vnet/ip/ip.h>
 #include <vnet/udp/udp.h>
+#include <vnet/adj/adj.h>
+#include <vnet/fib/fib_node.h>
 #include <vppinfra/bihash_16_8.h>
 
 #define L2TVPP_UDP_PORT 1701
@@ -46,11 +48,7 @@ typedef struct
   u16 local_tid;		/* in packets from the LAC */
   u16 peer_tid;			/* in packets to the LAC */
   u32 n_sessions;
-  /* cached adjacency toward peer_ip on the access side, refreshed on
-   * FIB change via a fib_entry_track, like the pppoe plugin does */
-  u32 adj_index;
-  u32 fib_entry_index;
-  u32 sibling_index;
+  u32 encap_fib_index;		/* FIB used to reach peer_ip (M1: table 0) */
 } l2tvpp_tunnel_t;
 
 typedef struct
@@ -60,12 +58,23 @@ typedef struct
   u16 peer_sid;			/* in packets to the LAC */
   u8 acfc;
   u8 pfc;
-  u32 sw_if_index;		/* the l2tvpp_session interface */
+  u32 sw_if_index;		/* the l2tvpp session interface */
   u32 hw_if_index;
-  /* precomputed encap: ip4 + udp + l2tp + ppp header bytes */
-  u8 *rewrite;
-  u32 encap_fib_index;
 } l2tvpp_session_t;
+
+/* L2TPv2 data header as we emit it: no L, no S, no O */
+typedef CLIB_PACKED (struct {
+  u16 flags_ver;
+  u16 tunnel_id;
+  u16 session_id;
+}) l2tvpp_hdr_t;
+
+/* PPP framing with address/control: FF 03 + 2-byte protocol */
+typedef CLIB_PACKED (struct {
+  u8 address;
+  u8 control;
+  u16 protocol;
+}) l2tvpp_ppp_hdr_t;
 
 /* decap lookup key: peer ip4, peer port, tunnel id, session id */
 typedef union
@@ -89,7 +98,6 @@ typedef struct
   u32 *session_index_by_sw_if_index;
   u8 handoff_enabled;
   u32 handoff_frame_queue_index;
-  u32 punt_next_index;		/* where non-owned L2TP packets go */
   u16 msg_id_base;
   vlib_main_t *vlib_main;
   vnet_main_t *vnet_main;
@@ -97,7 +105,23 @@ typedef struct
 
 extern l2tvpp_main_t l2tvpp_main;
 extern vlib_node_registration_t l2tvpp_input_node;
-extern vlib_node_registration_t l2tvpp_handoff_node;
+extern vnet_hw_interface_class_t l2tvpp_hw_class;
+extern vnet_device_class_t l2tvpp_device_class;
+
+u8 *format_l2tvpp_tunnel (u8 * s, va_list * args);
+u8 *format_l2tvpp_session (u8 * s, va_list * args);
+
+static_always_inline void
+l2tvpp_make_key (l2tvpp_session_key_t * k, u32 peer_ip4, u16 peer_port,
+		 u16 local_tid, u16 local_sid)
+{
+  k->as_u64[0] = 0;
+  k->as_u64[1] = 0;
+  k->peer_ip4 = peer_ip4;
+  k->peer_port = peer_port;
+  k->local_tid = local_tid;
+  k->local_sid = local_sid;
+}
 
 int l2tvpp_tunnel_add_del (l2tvpp_main_t * lm, ip46_address_t * local_ip,
 			  ip46_address_t * peer_ip, u16 local_port,

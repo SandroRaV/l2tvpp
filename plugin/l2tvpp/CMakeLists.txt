@@ -7,7 +7,6 @@ add_vpp_plugin(l2tvpp
   l2tvpp_api.c
   l2tvpp_cli.c
   node.c
-  encap.c
 
   API_FILES
   l2tvpp.api

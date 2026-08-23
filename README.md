@@ -5,11 +5,11 @@ L2TPv2 LNS data plane for VPP, so an LNS on commodity hardware forwards beyond
 
 | Dir | What |
 |---|---|
-| `docs/` | `design.md` (architecture, milestones), `m0-notes.md` (open investigation items) |
+| `docs/` | `design.md` (architecture, milestones), `first-test.md` (how to build and test), `m0-notes.md` (open items) |
 | `plugin/l2tvpp/` | VPP plugin: L2TPv2 decap/encap, per-session interface, worker handoff |
 | `syncd/` | daemon that installs accel-ppp sessions into VPP |
 | `test/` | VPP `make test` suite for the plugin (scapy, no NIC needed) |
-| `build/` | reproducible builds against VyOS's exact VPP (stable/2510 + vyos-vpp-patches), ISO build |
+| `build/` | `dev-build.sh` (plain VPP tree, fast loop), `build-vpp-debs.sh` (VyOS-identical packages), `build-iso.sh` |
 | `xdp/` | independent fallback: XDP cpumap steering for the *kernel* LNS path |
 | `lab/`, `bench/` | test rig configs and results |
 

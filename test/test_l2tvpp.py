@@ -18,6 +18,7 @@ from scapy.layers.l2 import Ether
 from scapy.layers.inet import IP, UDP
 from scapy.layers.l2tp import L2TP
 from scapy.layers.ppp import PPP, HDLC
+from vpp_ip_route import VppIpRoute, VppRoutePath
 
 L2TP_PORT = 1701
 
@@ -57,12 +58,27 @@ class TestL2tvpp(VppTestCase):
             pfc=False,
         ).sw_if_index
         self.sub_ip = "10.200.0.5"
-        self.vapi.sw_interface_set_flags(self.session, flags=1)
-        # route to the subscriber via the session interface
-        self.vapi.cli(f"ip route add {self.sub_ip}/32 via {self.session_name()}")
+        # route to the subscriber via the session interface (P2P: no nexthop)
+        self.route = VppIpRoute(
+            self, self.sub_ip, 32, [VppRoutePath("0.0.0.0", self.session)]
+        )
+        self.route.add_vpp_config()
 
-    def session_name(self):
-        return self.vapi.cli("show interface").split()  # placeholder, M1 fixes naming
+    def tearDown(self):
+        self.route.remove_vpp_config()
+        self.vapi.l2tvpp_session_add_del(
+            is_add=False, tunnel_index=self.tunnel, local_sid=1000, peer_sid=2000
+        )
+        self.vapi.l2tvpp_tunnel_add_del(
+            is_add=False,
+            local_ip=self.lac.local_ip4,
+            peer_ip=self.lac.remote_ip4,
+            local_port=L2TP_PORT,
+            peer_port=L2TP_PORT,
+            local_tid=100,
+            peer_tid=200,
+        )
+        super().tearDown()
 
     def l2tp_data(self, inner):
         return (
@@ -118,8 +134,7 @@ class TestL2tvpp(VppTestCase):
         self.pg_enable_capture(self.pg_interfaces)
         self.pg_start()
         self.core.assert_nothing_captured()
-        # M1: assert the punt counter in `show errors` / punt path instead
-        self.assertIn("punt", self.vapi.cli("show errors").lower())
+        self.assertIn("control message, punted", self.vapi.cli("show errors"))
 
     def test_unknown_session_is_punted(self):
         """unknown session id: not decapsulated"""
