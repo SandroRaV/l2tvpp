@@ -175,7 +175,7 @@ accel-ppp LNS: install the session by hand from the CLI after it comes up
 in the kernel, watch `vppctl show l2tvpp session` counters move and the
 kernel `pppN` counters stop. Benchmark single worker, one session.
 
-**M2, sync daemon (1 week)**: automatic install/remove from accel-ppp
+**M2, sync daemon (1 week)** [IN PROGRESS 2026-08-23: `syncd/l2tvppd.py` done and green in `make test TEST=test_l2tvpp_syncd`; parser unit-tested; accel-ppp end-to-end pending the rig]: automatic install/remove from accel-ppp
 events, restart reconciliation, IPv6 and PD routes. Benchmark hundreds of
 sessions, session churn, and verify LCP echo survives.
 
