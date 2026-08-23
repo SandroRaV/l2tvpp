@@ -18,7 +18,8 @@ git clone https://github.com/SandroRaV/l2tvpp.git
 cd l2tvpp
 ```
 
-VyOS `current` and Stream both build `stable/2510` today; `build/package.toml`
+VyOS `rolling` (the dev branch; the old `current` git branch is gone) and the
+Stream builds both build `stable/2510` today; `build/package.toml`
 tracks that and must be re-diffed against `build/package.toml.vyos-orig` if
 VyOS bumps the VPP version (`docs/first-test.md`).
 

@@ -12,7 +12,7 @@
 set -euo pipefail
 TTY=$([ -t 0 ] && echo -it || echo -i)
 
-BRANCH="${1:-current}"
+BRANCH="${1:-rolling}"
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="$REPO/build/out"
 WORK="$REPO/build/work"

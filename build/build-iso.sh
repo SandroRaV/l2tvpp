@@ -8,7 +8,7 @@
 set -euo pipefail
 TTY=$([ -t 0 ] && echo -it || echo -i)
 
-BRANCH="${1:-current}"
+BRANCH="${1:-rolling}"
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 WORK="$REPO/build/work"
 [ -d "$WORK/vyos-build" ] || { echo "run build-vpp-debs.sh first"; exit 1; }
