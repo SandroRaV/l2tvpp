@@ -16,7 +16,6 @@
  */
 #include <vnet/ip/ip4_packet.h>
 #include <vnet/udp/udp_packet.h>
-#include <vnet/interface_output.h>
 #include <l2tvpp/l2tvpp.h>
 
 typedef enum
