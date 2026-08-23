@@ -219,6 +219,15 @@ lns-vpp/
 ## 9. References
 
 - VPP pppoe plugin: https://github.com/FDio/vpp/tree/master/src/plugins/pppoe
+- IPng (Pim van Pelt), lcpng: the Linux Control Plane plugin, built out-of-tree
+  by symlinking into `src/plugins/` and `make pkg-deb`; the model for how our
+  plugin is built and for how the LCP tap (our punt target) behaves:
+  https://git.ipng.ch/ipng/lcpng , articles https://ipng.ch/s/articles/
+  (the 2021-12-23 "VPP Linux CP - Virtual Machine Playground" piece is the VM
+  lab pattern for tier 2 testing)
+- VyOS VPP package build (FDio stable/2510 + vyos-vpp-patches):
+  https://github.com/vyos/vyos-build/blob/current/scripts/package-build/vpp/package.toml ,
+  https://github.com/vyos/vyos-vpp-patches
 - VPP udp port registration: https://github.com/FDio/vpp/blob/master/src/vnet/udp/udp.h
 - VPP nat44-ed handoff node (worker distribution pattern): https://github.com/FDio/vpp/blob/master/src/plugins/nat/nat44-ed/nat44_ed_handoff.c
 - DPDK 22.03 release notes, L2TPv2 RSS: https://doc.dpdk.org/guides/rel_notes/release_22_03.html
