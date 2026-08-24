@@ -11,15 +11,22 @@ Design: docs/design.md step 4.
 Model
 -----
 Kernel is the source of truth. accel-ppp terminates L2TP/PPP and creates a
-`pppN` netdev per session; /proc/net/pppol2tp lists each with peer ip/port,
-local/peer tunnel id and session id, and the pppN name. The subscriber's
-address(es) come from `ip addr show pppN`.
+netdev per session (pppN, or l2tpN on VyOS); /proc/net/pppol2tp lists each
+with local/peer tunnel id and session id and the netdev name. Both tunnel
+endpoints come from `ip l2tp show tunnel` (the addr field in
+/proc/net/pppol2tp is NOT trustworthy: on the VyOS accel-ppp LNS it holds
+the local address, not the peer). The subscriber's address(es) come from
+`ip addr show <ifname>`.
 
 For every kernel session the daemon ensures, in VPP:
   l2tvpp_tunnel_add_del   (one per distinct peer-ip/peer-port/local-tid)
   l2tvpp_session_add_del  (-> an l2tvpp interface)
-  ip_route_add_del        (subscriber /32 and any /128 + delegated prefix,
-                           via the session interface)
+  l2tvpp_route_add_del    (subscriber /32 and any /128 + delegated prefix,
+                           via the session interface; the plugin installs it
+                           with its own FIB source so it beats linux-cp's
+                           mirror of the kernel session route - a plain
+                           ip_route_add_del would lose to lcp-rt and
+                           downstream traffic would keep punting)
 and removes, in reverse, whatever VPP has that the kernel no longer does.
 
 Event sources (pick with --mode)
@@ -40,7 +47,6 @@ vpp_papi ships with VPP (python3 vpp-api). On VyOS it is under the VPP
 install; point PYTHONPATH at it or run inside the VPP venv.
 """
 import argparse
-import ipaddress
 import logging
 import os
 import re
@@ -123,8 +129,10 @@ PORTS_RE = re.compile(r"UDP source / dest ports:\s*(?P<sport>\d+)/(?P<dport>\d+)
 
 def parse_l2tp_tunnels(text):
     """Parse `ip l2tp show tunnel` into {local_tid: {local_ip, peer_ip,
-    local_port, peer_port}}. This is where the LNS-local endpoint comes from -
-    /proc/net/pppol2tp only carries the peer address. Pure, so it is tested."""
+    local_port, peer_port}}. This is the authoritative source for BOTH tunnel
+    endpoints: the addr field in /proc/net/pppol2tp holds the LOCAL address
+    on the VyOS accel-ppp LNS (rig, 2026-08-24), so the peer parsed there is
+    only a fallback. Pure, so it is tested."""
     tunnels, cur = {}, None
     for line in text.splitlines():
         m = TUNNEL_RE.match(line)
@@ -166,15 +174,27 @@ def kernel_sessions(run=subprocess.run):
         # normal steady state, not an error - just report no sessions so the
         # daemon keeps running and mirrors them once they appear.
         return []
-    ss = parse_pppol2tp(text)
-    tuns = kernel_tunnels(run=run)
-    for s in ss:
-        # local endpoint per tunnel from `ip l2tp show tunnel` (auto, no config)
-        t = tuns.get(s["local_tid"])
-        if t and t["local_ip"]:
+    return merge_tunnel_endpoints(parse_pppol2tp(text),
+                                  kernel_tunnels(run=run))
+
+
+def merge_tunnel_endpoints(sessions, tunnels):
+    """Fill per-session tunnel endpoints from `ip l2tp show tunnel` (auto,
+    no config). Both ends: the /proc-derived peer_ip stays only as a
+    fallback, because on the VyOS accel-ppp LNS that field is really the
+    local address and using it as peer made the plugin encap to itself.
+    Pure, so it is tested."""
+    for s in sessions:
+        t = tunnels.get(s["local_tid"])
+        if not t:
+            continue
+        if t["local_ip"]:
             s["local_ip"] = t["local_ip"]
             s["local_port"] = t["local_port"]
-    return ss
+        if t["peer_ip"]:
+            s["peer_ip"] = t["peer_ip"]
+            s["peer_port"] = t["peer_port"]
+    return sessions
 
 
 def tunnel_key(s):
@@ -313,19 +333,12 @@ class Syncd:
             log.info("tunnel - %s", tk)
 
     def _route(self, prefix, sw_if_index, is_add):
-        af = 0 if ipaddress.ip_network(prefix, strict=False).version == 4 else 1
-        nh = {"address": {"ip4": "0.0.0.0"}} if af == 0 \
-            else {"address": {"ip6": "::"}}
-        # attached path via the session interface: nh 0.0.0.0/::, all FibPath
-        # fields spelled out (vpp_papi needs the fixed 16-slot label_stack)
-        path = {"sw_if_index": sw_if_index, "table_id": 0, "rpf_id": 0,
-                "weight": 1, "preference": 0, "next_hop_id": 0xFFFFFFFF,
-                "proto": af, "type": 0, "flags": 0, "nh": nh,
-                "n_labels": 0, "label_stack": [{}] * 16}
-        self.vpp.ip_route_add_del(
-            is_add=is_add, is_multipath=0,
-            route={"table_id": 0, "prefix": prefix, "n_paths": 1,
-                   "paths": [path]})
+        # the plugin installs it with its own FIB source, which outranks
+        # linux-cp's lcp-rt mirror of the kernel session route; an
+        # ip_route_add_del route (API source) loses to that mirror and
+        # downstream traffic keeps punting to the kernel
+        self.vpp.l2tvpp_route_add_del(
+            is_add=bool(is_add), prefix=prefix, sw_if_index=sw_if_index)
 
     # -- the reconcile pass ------------------------------------------------
     def reconcile(self, ksessions, sync_existing_routes=True, run=subprocess.run):

@@ -78,6 +78,32 @@ class TestParse(unittest.TestCase):
 
 
 
+    def test_merge_overrides_peer_from_tunnel_show(self):
+        # accel-ppp on the VyOS LNS puts the LOCAL address in the /proc
+        # addr field; the peer must come from `ip l2tp show tunnel`, or
+        # the plugin encaps downstream traffic to the LNS itself
+        proc = ("PPPoL2TP driver info, V2.0\n"
+                "TUNNEL 'tunl 5430', Y 1\n"
+                "  SESSION 'sess 5430/115' 0A420001/1701 1536/0073 -> "
+                "0002/004F 3 Y\n"
+                "   interface l2tp155\n")
+        tun = ("Tunnel 5430, encap UDP\n"
+               "  From 10.66.0.1 to 10.66.0.2\n"
+               "  Peer tunnel 2\n"
+               "  UDP source / dest ports: 1701/1701\n")
+        ss = l2tvppd.merge_tunnel_endpoints(
+            l2tvppd.parse_pppol2tp(proc), l2tvppd.parse_l2tp_tunnels(tun))
+        self.assertEqual(ss[0]["local_ip"], "10.66.0.1")
+        self.assertEqual(ss[0]["peer_ip"], "10.66.0.2")   # not 10.66.0.1
+        self.assertEqual(ss[0]["ifname"], "l2tp155")
+
+    def test_merge_keeps_proc_peer_without_tunnel_show(self):
+        # no `ip l2tp show tunnel` data for the tid: the /proc-derived
+        # peer stays as the fallback
+        ss = l2tvppd.merge_tunnel_endpoints(
+            l2tvppd.parse_pppol2tp(SAMPLE), {})
+        self.assertEqual(ss[0]["peer_ip"], "192.0.2.2")
+
     def test_parse_l2tp_tunnels(self):
         text = ("Tunnel 100, encap UDP\n"
                 "  From 192.0.2.1 to 192.0.2.2\n"
