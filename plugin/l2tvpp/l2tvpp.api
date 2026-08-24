@@ -116,6 +116,24 @@ define l2tvpp_session_details
   u64 tx_bytes;
 };
 
+/** \brief Add or delete a subscriber route via a session interface.
+    Installed under the plugin's own FIB source, which outranks linux-cp's
+    mirror of the kernel session route (lcp-rt); the same route added via
+    ip_route_add_del (API source) loses to that mirror and downstream
+    traffic keeps punting to the kernel.
+    @param prefix      subscriber prefix: the /32 or /128 peer address, or
+                       a delegated prefix
+    @param sw_if_index the session interface from l2tvpp_session_add_del_reply
+*/
+autoreply define l2tvpp_route_add_del
+{
+  u32 client_index;
+  u32 context;
+  bool is_add;
+  vl_api_prefix_t prefix;
+  vl_api_interface_index_t sw_if_index;
+};
+
 /** \brief Enable/disable worker handoff by session index (for NICs whose
     RSS hashes only the outer UDP 4-tuple, so all of one LAC's sessions
     land on one core) */

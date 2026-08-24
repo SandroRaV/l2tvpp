@@ -48,10 +48,10 @@ class TestL2tvpp(VppTestCase):
             cls.pg0.sw_if_index, cls.pg0.remote_mac, cls.pg0.remote_ip4,
             is_add=1, flags=1)
 
-        # one tunnel + session + subscriber route for the whole class. The
-        # route is added with a raw ip_route_add_del (not a VppIpRoute object)
-        # so the per-test registry cleanup does not tear it down between
-        # methods. Session churn is covered by TestL2tvppAddDel.
+        # one tunnel + session + subscriber route for the whole class, all
+        # added with raw vapi calls (no Vpp* objects) so the per-test
+        # registry cleanup does not tear them down between methods. Session
+        # churn is covered by TestL2tvppAddDel.
         cls.tunnel = cls.vapi.l2tvpp_tunnel_add_del(
             is_add=True, local_ip=cls.lac.local_ip4, peer_ip=cls.lac.remote_ip4,
             local_port=L2TP_PORT, peer_port=L2TP_PORT,
@@ -60,21 +60,14 @@ class TestL2tvpp(VppTestCase):
             is_add=True, tunnel_index=cls.tunnel,
             local_sid=LOCAL_SID, peer_sid=PEER_SID,
             acfc=False, pfc=False).sw_if_index
-        cls.sub_path = VppRoutePath("0.0.0.0", cls.session).encode()
-        cls.sub_prefix = {"address": {"un": {"ip4": SUB_IP}, "af": 0},
-                          "len": 32}
-        cls.vapi.ip_route_add_del(
-            is_add=1, is_multipath=0,
-            route={"table_id": 0, "prefix": cls.sub_prefix,
-                   "n_paths": 1, "paths": [cls.sub_path]})
+        cls.vapi.l2tvpp_route_add_del(
+            is_add=True, prefix=SUB_IP + "/32", sw_if_index=cls.session)
 
     @classmethod
     def tearDownClass(cls):
         try:
-            cls.vapi.ip_route_add_del(
-                is_add=0, is_multipath=0,
-                route={"table_id": 0, "prefix": cls.sub_prefix,
-                       "n_paths": 1, "paths": [cls.sub_path]})
+            cls.vapi.l2tvpp_route_add_del(
+                is_add=False, prefix=SUB_IP + "/32", sw_if_index=cls.session)
             cls.vapi.ip_neighbor_add_del(
                 cls.pg0.sw_if_index, cls.pg0.remote_mac, cls.pg0.remote_ip4,
                 is_add=0, flags=1)
@@ -193,6 +186,27 @@ class TestL2tvpp(VppTestCase):
         self.assertEqual(
             self.l2tvpp_input_error("decapsulated"), decap_before + 10)
 
+    def test_route_source_beats_api_route(self):
+        """the plugin's route source must outrank a competing API route for
+        the same /32; on the LNS the competitor is linux-cp's lcp-rt mirror
+        of the kernel session route (which also outranks API)"""
+        detour = VppIpRoute(self, SUB_IP, 32,
+                            [VppRoutePath(self.core.remote_ip4,
+                                          self.core.sw_if_index)])
+        detour.add_vpp_config()
+        p = (Ether(src=self.core.remote_mac, dst=self.core.local_mac)
+             / IP(src=self.core.remote_ip4, dst=SUB_IP)
+             / UDP(sport=5678, dport=1234))
+        self.pg_enable_capture(self.pg_interfaces)
+        self.core.add_stream([p] * 10)
+        self.pg_start()
+        # the l2tvpp route wins: traffic is encapped towards the LAC, not
+        # sent out the detour
+        rx = self.lac.get_capture(10)
+        for r in rx:
+            self.assertEqual(r[L2TP].session_id, PEER_SID)
+        detour.remove_vpp_config()
+
 
 class TestL2tvppAddDel(VppTestCase):
     """l2tvpp session churn: repeated add/del must not corrupt forwarding"""
@@ -278,15 +292,8 @@ class TestL2tvppHandoff(VppTestCase):
             swif = cls.vapi.l2tvpp_session_add_del(
                 is_add=True, tunnel_index=cls.tunnel, local_sid=lsid,
                 peer_sid=psid, acfc=False, pfc=False).sw_if_index
-            path = {"sw_if_index": swif, "table_id": 0, "rpf_id": 0,
-                    "weight": 1, "preference": 0, "next_hop_id": 0xFFFFFFFF,
-                    "proto": 0, "type": 0, "flags": 0,
-                    "nh": {"address": {"ip4": "0.0.0.0"}},
-                    "n_labels": 0, "label_stack": [{}] * 16}
-            cls.vapi.ip_route_add_del(
-                is_add=1, is_multipath=0,
-                route={"table_id": 0, "prefix": sub + "/32", "n_paths": 1,
-                       "paths": [path]})
+            cls.vapi.l2tvpp_route_add_del(
+                is_add=True, prefix=sub + "/32", sw_if_index=swif)
             cls.subs[lsid] = (psid, sub)
         cls.vapi.l2tvpp_set_handoff(enable=True)
 

@@ -134,6 +134,58 @@ VLIB_CLI_COMMAND (l2tvpp_session_command, static) = {
 };
 
 static clib_error_t *
+l2tvpp_route_cli (vlib_main_t * vm, unformat_input_t * input,
+		  vlib_cli_command_t * cmd)
+{
+  l2tvpp_main_t *lm = &l2tvpp_main;
+  unformat_input_t _line, *line = &_line;
+  fib_prefix_t pfx = { 0 };
+  u32 sw_if_index = ~0, plen = ~0;
+  u8 is_add = 1;
+  int rv;
+
+  if (!unformat_user (input, unformat_line_input, line))
+    return 0;
+
+  while (unformat_check_input (line) != UNFORMAT_END_OF_INPUT)
+    {
+      if (unformat (line, "del"))
+	is_add = 0;
+      else if (unformat (line, "%U/%d", unformat_ip4_address,
+			 &pfx.fp_addr.ip4, &plen))
+	pfx.fp_proto = FIB_PROTOCOL_IP4;
+      else if (unformat (line, "%U/%d", unformat_ip6_address,
+			 &pfx.fp_addr.ip6, &plen))
+	pfx.fp_proto = FIB_PROTOCOL_IP6;
+      else if (unformat (line, "%U", unformat_vnet_sw_interface,
+			 lm->vnet_main, &sw_if_index))
+	;
+      else
+	{
+	  unformat_free (line);
+	  return clib_error_return (0, "unknown input `%U'",
+				    format_unformat_error, line);
+	}
+    }
+  unformat_free (line);
+
+  if (plen == ~0 || sw_if_index == ~0)
+    return clib_error_return (0, "prefix and session interface required");
+  pfx.fp_len = plen;
+
+  rv = l2tvpp_route_add_del (lm, &pfx, sw_if_index, is_add);
+  if (rv)
+    return clib_error_return (0, "l2tvpp_route_add_del returned %d", rv);
+  return 0;
+}
+
+VLIB_CLI_COMMAND (l2tvpp_route_command, static) = {
+  .path = "l2tvpp route",
+  .short_help = "l2tvpp route [del] <prefix> <session-interface>",
+  .function = l2tvpp_route_cli,
+};
+
+static clib_error_t *
 show_l2tvpp_tunnel_cli (vlib_main_t * vm, unformat_input_t * input,
 			vlib_cli_command_t * cmd)
 {

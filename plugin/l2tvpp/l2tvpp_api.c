@@ -67,6 +67,22 @@ vl_api_l2tvpp_session_add_del_t_handler (vl_api_l2tvpp_session_add_del_t * mp)
 }
 
 static void
+vl_api_l2tvpp_route_add_del_t_handler (vl_api_l2tvpp_route_add_del_t * mp)
+{
+  l2tvpp_main_t *lm = &l2tvpp_main;
+  vl_api_l2tvpp_route_add_del_reply_t *rmp;
+  fib_prefix_t pfx;
+  int rv;
+
+  ip_prefix_decode (&mp->prefix, &pfx);
+  rv = l2tvpp_route_add_del (lm, &pfx,
+			     clib_net_to_host_u32 (mp->sw_if_index),
+			     mp->is_add);
+
+  REPLY_MACRO (VL_API_L2TVPP_ROUTE_ADD_DEL_REPLY);
+}
+
+static void
 send_tunnel_details (l2tvpp_main_t * lm, vl_api_registration_t * reg,
 		     u32 context, l2tvpp_tunnel_t * t)
 {

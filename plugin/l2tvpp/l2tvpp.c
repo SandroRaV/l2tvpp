@@ -368,6 +368,37 @@ l2tvpp_session_add_del (l2tvpp_main_t * lm, u32 tunnel_index,
 }
 
 /* --------------------------------------------------------------------
+ * subscriber routes: installed under the plugin's own fib source so they
+ * outrank linux-cp's mirror of the kernel session route (lcp-rt), which
+ * an API-source route cannot (see L2TVPP_FIB_SOURCE_PRIORITY)
+ */
+int
+l2tvpp_route_add_del (l2tvpp_main_t * lm, const fib_prefix_t * pfx,
+		      u32 sw_if_index, u8 is_add)
+{
+  u32 fib_index;
+  fib_route_path_t path = {
+    .frp_sw_if_index = sw_if_index,
+    .frp_fib_index = ~0,
+    .frp_weight = 1,
+  };
+
+  if (sw_if_index >= vec_len (lm->session_index_by_sw_if_index)
+      || lm->session_index_by_sw_if_index[sw_if_index] == ~0)
+    return VNET_API_ERROR_INVALID_SW_IF_INDEX;
+
+  path.frp_proto = fib_proto_to_dpo (pfx->fp_proto);
+  fib_index = fib_table_get_index_for_sw_if_index (pfx->fp_proto,
+						   sw_if_index);
+  if (is_add)
+    fib_table_entry_path_add2 (fib_index, pfx, lm->fib_src,
+			       FIB_ENTRY_FLAG_ATTACHED, &path);
+  else
+    fib_table_entry_path_remove2 (fib_index, pfx, lm->fib_src, &path);
+  return 0;
+}
+
+/* --------------------------------------------------------------------
  * worker handoff (spread decap across cores by session; see handoff.c)
  */
 int
@@ -408,6 +439,9 @@ l2tvpp_init (vlib_main_t * vm)
   lm->handoff_frame_queue_index =
     vlib_frame_queue_main_init (l2tvpp_input_node.index, 0);
   lm->handoff_enabled = 0;
+
+  lm->fib_src = fib_source_allocate ("l2tvpp", L2TVPP_FIB_SOURCE_PRIORITY,
+				     FIB_SOURCE_BH_API);
 
   /* take over UDP 1701 from udp-local; non-data packets are handed back
    * to the punt path by l2tvpp-input */

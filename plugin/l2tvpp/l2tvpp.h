@@ -23,6 +23,7 @@
 #include <vnet/udp/udp.h>
 #include <vnet/adj/adj.h>
 #include <vnet/fib/fib_node.h>
+#include <vnet/fib/fib_source.h>
 #include <vppinfra/bihash_16_8.h>
 
 #define L2TVPP_UDP_PORT 1701
@@ -38,6 +39,13 @@
 /* PPP protocol numbers we forward; everything else is punted */
 #define PPP_PROTO_IP4 0x0021
 #define PPP_PROTO_IP6 0x0057
+
+/* FIB source priority for subscriber routes: must be numerically below
+ * (= better than) linux-cp's "lcp-rt" (FIB_SOURCE_PRIORITY_HI, 0x10) -
+ * the kernel session route mirrored by linux-cp is a receive path into
+ * the kernel, and if it wins, downstream traffic keeps punting instead
+ * of taking the l2tvpp session interface */
+#define L2TVPP_FIB_SOURCE_PRIORITY 0x0f
 
 typedef struct
 {
@@ -98,6 +106,7 @@ typedef struct
   u32 *session_index_by_sw_if_index;
   u8 handoff_enabled;
   u32 handoff_frame_queue_index;
+  fib_source_t fib_src;		/* subscriber routes; see L2TVPP_FIB_SOURCE_PRIORITY */
   u16 msg_id_base;
   vlib_main_t *vlib_main;
   vnet_main_t *vnet_main;
@@ -129,5 +138,7 @@ int l2tvpp_tunnel_add_del (l2tvpp_main_t * lm, ip46_address_t * local_ip,
 int l2tvpp_session_add_del (l2tvpp_main_t * lm, u32 tunnel_index,
 			   u16 local_sid, u16 peer_sid, u8 acfc, u8 pfc,
 			   u8 is_add, u32 * sw_if_indexp);
+int l2tvpp_route_add_del (l2tvpp_main_t * lm, const fib_prefix_t * pfx,
+			 u32 sw_if_index, u8 is_add);
 
 #endif /* __included_l2tvpp_h__ */
