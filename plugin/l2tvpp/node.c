@@ -90,6 +90,7 @@ VLIB_NODE_FN (l2tvpp_input_node) (vlib_main_t * vm,
   u32 n_left = frame->n_vectors, *from;
   vlib_buffer_t *bufs[VLIB_FRAME_SIZE], **b = bufs;
   u16 nexts[VLIB_FRAME_SIZE], *next = nexts;
+  u32 counts[L2TVPP_INPUT_N_ERROR] = { 0 };
 
   from = vlib_frame_vector_args (frame);
   vlib_get_buffers (vm, from, bufs, n_left);
@@ -199,7 +200,13 @@ VLIB_NODE_FN (l2tvpp_input_node) (vlib_main_t * vm,
       next0 = L2TVPP_INPUT_NEXT_PUNT;
 
     trace:
-      b0->error = node->errors[error];
+      /* only dropped packets reach error-drop, which counts b->error;
+       * punted and decapsulated packets keep forwarding, so their
+       * counters must be incremented here */
+      if (next0 == L2TVPP_INPUT_NEXT_DROP)
+	b0->error = node->errors[error];
+      else
+	counts[error]++;
       if (PREDICT_FALSE (b0->flags & VLIB_BUFFER_IS_TRACED))
 	{
 	  l2tvpp_input_trace_t *tr =
@@ -218,6 +225,10 @@ VLIB_NODE_FN (l2tvpp_input_node) (vlib_main_t * vm,
     }
 
   vlib_buffer_enqueue_to_next (vm, node, from, nexts, frame->n_vectors);
+
+  for (u32 i = 0; i < L2TVPP_INPUT_N_ERROR; i++)
+    if (counts[i])
+      vlib_node_increment_counter (vm, node->node_index, i, counts[i]);
   return frame->n_vectors;
 }
 

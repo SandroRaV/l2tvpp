@@ -17,6 +17,7 @@ from scapy.layers.l2 import Ether
 from scapy.layers.inet import IP, UDP
 from scapy.layers.l2tp import L2TP
 from scapy.layers.ppp import PPP, HDLC
+from vpp_ip import VppIpPuntRedirect
 from vpp_ip_route import VppIpRoute, VppRoutePath
 from vpp_neighbor import VppNeighbor
 
@@ -158,6 +159,39 @@ class TestL2tvpp(VppTestCase):
         self.lac.add_stream([pkt])
         self.pg_start()
         self.core.assert_nothing_captured()
+
+    def l2tvpp_input_error(self, reason):
+        """summed l2tvpp-input error counter across threads, 0 if absent"""
+        total = 0
+        for line in self.vapi.cli("show errors").splitlines():
+            if "l2tvpp-input" in line and reason in line:
+                total += int(line.split()[0])
+        return total
+
+    def test_counters_climb_when_forwarding(self):
+        """punt/decap counters must not depend on error-drop seeing the
+        buffer: on the LNS, linux-cp redirects punted packets out a tap
+        instead of dropping them"""
+        VppIpPuntRedirect(self, self.lac.sw_if_index, self.core.sw_if_index,
+                          self.core.remote_ip4).add_vpp_config()
+        ctrl_before = self.l2tvpp_input_error("control message, punted")
+        decap_before = self.l2tvpp_input_error("decapsulated")
+        ctrl = (Ether(src=self.lac.remote_mac, dst=self.lac.local_mac)
+                / IP(src=self.lac.remote_ip4, dst=self.lac.local_ip4)
+                / UDP(sport=L2TP_PORT, dport=L2TP_PORT)
+                / L2TP(hdr="control+length+sequence",
+                       tunnel_id=LOCAL_TID, session_id=0, ns=1, nr=1))
+        inner = IP(src=SUB_IP, dst=self.core.remote_ip4) / UDP()
+        self.pg_enable_capture(self.pg_interfaces)
+        self.lac.add_stream([ctrl] + [self.l2tp_data(inner)] * 10)
+        self.pg_start()
+        # 10 decapped + 1 redirected control, all towards pg1
+        self.core.get_capture(11)
+        self.assertEqual(
+            self.l2tvpp_input_error("control message, punted"),
+            ctrl_before + 1)
+        self.assertEqual(
+            self.l2tvpp_input_error("decapsulated"), decap_before + 10)
 
 
 class TestL2tvppAddDel(VppTestCase):
