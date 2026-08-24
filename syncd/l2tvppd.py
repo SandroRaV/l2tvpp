@@ -162,7 +162,10 @@ def kernel_sessions(run=subprocess.run):
     try:
         text = open("/proc/net/pppol2tp").read()
     except FileNotFoundError:
-        sys.exit("/proc/net/pppol2tp missing: l2tp_ppp not loaded or no sessions")
+        # l2tp_ppp not loaded yet (no L2TP sessions have come up): that is a
+        # normal steady state, not an error - just report no sessions so the
+        # daemon keeps running and mirrors them once they appear.
+        return []
     ss = parse_pppol2tp(text)
     tuns = kernel_tunnels(run=run)
     for s in ss:
