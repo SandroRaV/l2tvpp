@@ -2,8 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # systemd unit for l2tvppd. Install to /etc/systemd/system/ (or on VyOS keep
-# under /config and symlink), edit --local-ip to the accel-ppp
-# outside-address, then: systemctl enable --now l2tvppd
+# under /config and symlink), then: systemctl enable --now l2tvppd
 [Unit]
 Description=l2tvpp sync daemon (mirror kernel L2TP/PPP sessions into VPP)
 # order after VPP but do not force it up (see build/vyos-image/l2tvppd.service)
@@ -13,9 +12,9 @@ After=vpp.service accel-ppp.service
 Type=simple
 # vpp_papi ships with VPP; point PYTHONPATH at it if not already importable
 Environment=PYTHONPATH=/usr/lib/python3/dist-packages
+# the LNS local IP/port are auto-derived per tunnel from `ip l2tp show tunnel`
 ExecStart=/usr/bin/python3 /config/l2tvpp/l2tvppd.py daemon \
-    --local-ip 10.66.0.1 --local-port 1701 --interval 30 \
-    --state /run/l2tvppd.json
+    --interval 30 --state /run/l2tvppd.json
 Restart=on-failure
 RestartSec=2
 

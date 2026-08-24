@@ -1,23 +1,23 @@
 # L2TPv2 LNS data plane in VPP: design
 
-Status: draft, 2026-08-23. Target box: EPYC 7F32 / ConnectX-4 Lx
-(`manuals/dgw/lns/config_manuals/epyc-7f32-h12ssl-pppoe-dut.md`), later any
-VPP host with an E810.
+Status: draft. Target: any multicore x86 host running VPP with a
+DPDK-capable NIC.
 
 ## 1. Goal
 
 Terminate L2TPv2/PPP subscriber sessions with the per-packet data path in
 VPP, so that an LNS on commodity hardware forwards beyond 10G without the
-kernel single-core limit (`vyos/vyos-l2tp-lns-tuning.md` step 1) and without
-the VPP punt ceiling (~213k pps, `6wind-vsr-lns-l2tp-bngblaster.md`).
+kernel single-core limit (all of one LAC's sessions share a UDP 4-tuple, so
+RSS pins them to one core) and without punting L2TP data to a kernel control
+plane.
 
 Not a goal: a new control plane. L2TP control channel, PPP LCP/auth/IPCP/
 IPv6CP, RADIUS, pools and CoA stay in accel-ppp (accel-ppp-ng on VyOS).
 
 ## 2. Architecture
 
-Same split VyOS uses for PPPoE offload (`vyos-vpp-pppoe-epyc-7f32.md`
-step 9 and step 11), with L2TP/UDP/IP instead of PPPoE/Ethernet:
+Same split VyOS uses for PPPoE offload (accel-ppp control plane, VPP data
+plane), with L2TP/UDP/IP instead of PPPoE/Ethernet:
 
 ```
  LAC ---UDP 1701---> [VPP access port]
@@ -100,7 +100,8 @@ a memcpy of the rewrite and two length/checksum fixups.
 
 ### 3d. Worker distribution
 
-ConnectX-4 Lx RSS sees only the outer tuple, so one LAC = one worker on RX.
+A NIC whose RSS hashes only the outer UDP 4-tuple sees one LAC as a single
+flow, so one LAC = one worker on RX.
 Add a handoff stage like `nat44-ed` does: `l2tvpp-input` on the RX worker
 parses just far enough to get the session index and enqueues the buffer to
 worker `session_index % n_workers` via `vlib_buffer_enqueue_to_thread`;
@@ -170,23 +171,22 @@ stable for development). Output: M0 notes in `docs/`, decisions updated here.
 
 **M1, static data path (1-2 weeks)**: plugin with tunnel/session objects,
 decap to `ip4-input`, encap via session interface, CLI and API, no handoff.
-Test with BNG Blaster in L2TP mode through mpd5 against a plain Linux
+Test with an L2TP LAC (e.g. BNG Blaster, or a software LAC) against a Linux
 accel-ppp LNS: install the session by hand from the CLI after it comes up
 in the kernel, watch `vppctl show l2tvpp session` counters move and the
 kernel `pppN` counters stop. Benchmark single worker, one session.
 
-**M2, sync daemon (1 week)** [IN PROGRESS 2026-08-23: `syncd/l2tvppd.py` done and green in `make test TEST=test_l2tvpp_syncd`; parser unit-tested; accel-ppp end-to-end pending the rig (l2tvpplast)]: automatic install/remove from accel-ppp
+**M2, sync daemon (1 week)** [IN PROGRESS 2026-08-23: `syncd/l2tvppd.py` done and green in `make test TEST=test_l2tvpp_syncd`; parser unit-tested; accel-ppp end-to-end pending the rig]: automatic install/remove from accel-ppp
 events, restart reconciliation, IPv6 and PD routes. Benchmark hundreds of
 sessions, session churn, and verify LCP echo survives.
 
-**M3, scale (1-2 weeks)** [handoff DONE 2026-08-23: `handoff.c` (l2tvpp-handoff node, session%%n_workers, frame-queue to l2tvpp-input), `l2tvpp handoff on|off` CLI + l2tvpp_set_handoff API; tested with 2 workers in TestL2tvppHandoff. Multi-worker throughput benchmark still needs the EPYC/ConnectX-4 rig]: worker handoff, multi-worker benchmark on the
-EPYC with the ConnectX-4 Lx; measure against the kernel+XDP baseline
-(`l2tp-xdp/`) and the 6WIND numbers in `bench/comparison-25g.md`. Then the
+**M3, scale (1-2 weeks)** [handoff DONE 2026-08-23: `handoff.c` (l2tvpp-handoff node, session%%n_workers, frame-queue to l2tvpp-input), `l2tvpp handoff on|off` CLI + l2tvpp_set_handoff API; tested with 2 workers in TestL2tvppHandoff. multi-worker throughput benchmark pending]: worker handoff, multi-worker
+benchmark on real hardware; compare against the kernel path. Then the
 E810 RSS variant if a card is available.
 
 **M4, VyOS integration (later)**: build the plugin into the VyOS VPP
 package, wire the daemon into VyOS config (`set vpn l2tp remote-access
-offload vpp` or similar), docs in `manuals/dp/en/` with the German pair.
+offload vpp` or similar).
 
 ## 7. Risks
 
@@ -212,7 +212,7 @@ l2tvpp/
                           l2tvpp.c (objects, API, CLI), node.c (decap, handoff),
                           encap.c (session interface tx)
   syncd/                  l2tvpp-syncd (python, vpp_papi)
-  lab/                    bngblaster + mpd5 + accel-ppp configs for M1/M2
+  lab/                    LAC + accel-ppp configs for M1/M2
   bench/                  results (md + html pairs)
 ```
 
@@ -232,6 +232,4 @@ l2tvpp/
 - VPP nat44-ed handoff node (worker distribution pattern): https://github.com/FDio/vpp/blob/master/src/plugins/nat/nat44-ed/nat44_ed_handoff.c
 - DPDK 22.03 release notes, L2TPv2 RSS: https://doc.dpdk.org/guides/rel_notes/release_22_03.html
 - RFC 2661 (L2TPv2), RFC 1661 (PPP), RFC 1662 (HDLC-like framing, ACFC/PFC)
-- Related docs in this repo: `manuals/dgw/lns/config_manuals/vyos/vyos-vpp-pppoe-epyc-7f32.md`,
-  `manuals/dgw/lns/config_manuals/vyos/vyos-l2tp-lns-tuning.md`,
-  `6wind-vsr-lns-l2tp-bngblaster.md`, `l2tp-xdp/README.md`
+- The XDP kernel-path fallback: `xdp/README.md`

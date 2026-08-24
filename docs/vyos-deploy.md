@@ -50,7 +50,7 @@ scp build/out/vpp-plugin-core_*.deb vyos@lns:/tmp/
 ```
 
 On the VyOS box (get a real root shell first - VyOS's op-mode blocks raw
-commands; see `vyos-vpp-pppoe-connectx-5019d-4c.md` step 4 in the rig notes):
+commands - use `sudo su -` or the `configure` shell):
 
 ```
 sudo dpkg -i /tmp/vpp-plugin-core_*.deb
@@ -100,8 +100,7 @@ in-tree hook to adapt.
 
 The plugin needs the LAC-facing interface owned by VPP (kernel-mode NICs
 cannot reach the VPP data path). On VyOS that is the VPP dataplane config,
-e.g. on the EPYC/ConnectX rig `eth8` = access, `eth9` = uplink
-(`epyc-7f32-h12ssl-pppoe-dut.md`). Confirm VPP sees them:
+e.g. `eth8` = access (LAC-facing), `eth9` = uplink. Confirm VPP sees them:
 
 ```
 vppctl show interface addr

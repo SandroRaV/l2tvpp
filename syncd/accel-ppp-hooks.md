@@ -17,7 +17,7 @@ hook is a one-liner that just kicks a reconcile.
 # nudge l2tvppd to reconcile now instead of waiting for the safety-net tick
 systemctl kill -s HUP l2tvppd 2>/dev/null || \
   pkill -HUP -f 'l2tvppd.py daemon' 2>/dev/null || \
-  /usr/bin/python3 /config/l2tvpp/l2tvppd.py reconcile --local-ip 10.66.0.1
+  /usr/bin/python3 /config/l2tvpp/l2tvppd.py reconcile
 exit 0
 ```
 

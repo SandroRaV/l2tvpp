@@ -6,8 +6,7 @@ l2tvppd: the M2 sync daemon. It keeps the VPP l2tvpp data plane in step with
 the sessions accel-ppp brings up in the kernel, using the VPP binary API
 (vpp_papi) rather than shelling vppctl, so it scales to hundreds of sessions.
 
-Design: docs/design.md step 4. It grew out of an earlier vppctl-based M1
-helper (now kept with the hardware-rig material in the l2tvpplast project).
+Design: docs/design.md step 4.
 
 Model
 -----

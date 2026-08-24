@@ -19,8 +19,8 @@ L2TPv2 LNS data plane for VPP, so an LNS on commodity hardware forwards beyond
    build script produces (`build/work/vyos-build/scripts/package-build/vpp/vpp/`).
    Runs in CI.
 2. **VM lab**: VyOS ISO from `build/build-iso.sh` in KVM (virtio NICs), BNG
-   Blaster + mpd5 VMs as LAC. Functional and churn tests.
-3. **Hardware**: EPYC 7F32 / ConnectX-4 Lx, BNG Blaster DPDK rig. Numbers.
+   an L2TP LAC (e.g. BNG Blaster) as the client. Functional and churn tests.
+3. **Hardware**: a multicore x86 box with a DPDK-capable NIC. Throughput numbers.
 
 ## Getting the plugin onto a VyOS box
 

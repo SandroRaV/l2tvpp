@@ -91,8 +91,8 @@ trace add pg-input 10       # then replay a pcap with packet-generator
 ## 5. After it is green
 
 `build/build-vpp-debs.sh` for the VyOS-identical packages, then `dpkg -i` on
-the VyOS LNS and the rig test from `docs/design.md` M1: BNG Blaster through
-mpd5, session up in accel-ppp, install the same session by hand with
+the VyOS LNS and the M1 test from `docs/design.md`: an L2TP LAC (e.g.
+BNG Blaster) brings a session up in accel-ppp, install the same session by hand with
 `vppctl l2tvpp ...`, watch `show l2tvpp session` counters move and the
 kernel `pppN` counters stop.
 

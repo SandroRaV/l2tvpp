@@ -19,16 +19,15 @@ packet).
 
 ```
 # one full reconcile pass, then exit (idempotent; good for cron / by hand)
-python3 l2tvppd.py reconcile --local-ip 10.66.0.1
+python3 l2tvppd.py reconcile
 
 # long-running: reconcile on start, on SIGHUP, and every --interval seconds
-python3 l2tvppd.py daemon --local-ip 10.66.0.1 --interval 30
+python3 l2tvppd.py daemon --interval 30
 ```
 
-`--local-ip` is the accel-ppp `outside-address` (the LNS tunnel endpoint);
-`--local-port` is 1701 unless accel-ppp uses ephemeral ports. State (what the
-daemon installed, for clean teardown and restart) lives in `--state`
-(default `/run/l2tvppd.json`).
+The LNS local IP/port are auto-derived per tunnel from `ip l2tp show tunnel`,
+so no addresses need configuring. State (what the daemon installed, for clean
+teardown and restart) lives in `--state` (default `/run/l2tvppd.json`).
 
 ## Test
 
@@ -41,4 +40,4 @@ make test TEST=test_l2tvpp_syncd                   # reconcile vs live VPP
 
 End-to-end against real accel-ppp on the VyOS LNS, and RADIUS interim
 accounting fed from `l2tvpp_session_dump` (see `accel-ppp-hooks.md`). Those
-need the hardware rig (the l2tvpplast project).
+need a hardware rig.

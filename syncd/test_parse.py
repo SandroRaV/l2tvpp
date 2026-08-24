@@ -17,14 +17,14 @@ import l2tvppd  # noqa: E402
 SAMPLE = """\
 PPPoL2TP driver info, 2.0.0
 TUNNEL 3 peer 5, 1 sessions
-  SESSION '', 0A420002/1701 0064/03e8 -> 00c8/07d0
+  SESSION '', C0000202/1701 0064/03e8 -> 00c8/07d0
    state 4, uptime 12, difs 0 0, reorderto 0
    interface ppp0
-  SESSION '', 0A420002/1701 0064/03e9 -> 00c8/07d1
+  SESSION '', C0000202/1701 0064/03e9 -> 00c8/07d1
    state 4, uptime 10
    interface ppp1
 TUNNEL 4 peer 6, 1 sessions
-  SESSION '', 0A420003/1701 0065/0400 -> 00c9/0800
+  SESSION '', C0000203/1701 0065/0400 -> 00c9/0800
    state 4, uptime 8
    interface ppp2
 """
@@ -35,7 +35,7 @@ class TestParse(unittest.TestCase):
         ss = l2tvppd.parse_pppol2tp(SAMPLE)
         self.assertEqual(len(ss), 3)
         s0 = ss[0]
-        self.assertEqual(s0["peer_ip"], "10.66.0.2")     # 0A420002
+        self.assertEqual(s0["peer_ip"], "192.0.2.2")     # C0000202
         self.assertEqual(s0["peer_port"], 1701)
         self.assertEqual(s0["local_tid"], 0x64)          # 100
         self.assertEqual(s0["local_sid"], 0x3e8)         # 1000
@@ -80,19 +80,19 @@ class TestParse(unittest.TestCase):
 
     def test_parse_l2tp_tunnels(self):
         text = ("Tunnel 100, encap UDP\n"
-                "  From 10.66.0.1 to 10.66.0.2\n"
+                "  From 192.0.2.1 to 192.0.2.2\n"
                 "  Peer tunnel 200\n"
                 "  UDP source / dest ports: 1701/1701\n"
                 "  UDP checksum: disabled\n"
                 "Tunnel 101, encap UDP\n"
-                "  From 10.66.0.5 to 10.66.0.9\n"
+                "  From 192.0.2.5 to 192.0.2.9\n"
                 "  Peer tunnel 201\n"
                 "  UDP source / dest ports: 1701/1702\n")
         tuns = l2tvppd.parse_l2tp_tunnels(text)
-        self.assertEqual(tuns[100]["local_ip"], "10.66.0.1")
-        self.assertEqual(tuns[100]["peer_ip"], "10.66.0.2")
+        self.assertEqual(tuns[100]["local_ip"], "192.0.2.1")
+        self.assertEqual(tuns[100]["peer_ip"], "192.0.2.2")
         self.assertEqual(tuns[100]["local_port"], 1701)
-        self.assertEqual(tuns[101]["local_ip"], "10.66.0.5")
+        self.assertEqual(tuns[101]["local_ip"], "192.0.2.5")
         self.assertEqual(tuns[101]["peer_port"], 1702)
 
 

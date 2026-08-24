@@ -20,7 +20,7 @@ Decision: punt path for l2tvpp-input; daemon vs accel-ppp-ng hook.
 - [ ] accel-ppp `use-ephemeral-ports`: which local UDP port the tunnel actually uses (affects tunnel local_port in VPP)
 Decision: event source and the data needed per session.
 
-## 4. LAC behaviour (mpd5, MX204, carrier)
+## 4. LAC behaviour (software LAC, vendor LNS/LAC, carrier)
 - [ ] Data sequencing (S bit) on data packets: on or off
 - [ ] Outer UDP checksum 0 accepted?
 - [ ] Does the LAC follow a changed LNS source port (RFC 2661 requirement)?
@@ -28,4 +28,4 @@ Decision: whether sequencing support is needed before M3.
 
 ## 5. Build environment
 - [ ] VPP build host (Debian 12, `make install-dep`, `make build`) with the same VPP version as the target
-- [ ] Test VPP with a ConnectX-4 Lx in a plain Debian host first (mlx5 PMD, rdma-core), then the VyOS build
+- [ ] Test VPP in a plain Debian host first (packet-generator, no NIC), then the VyOS build

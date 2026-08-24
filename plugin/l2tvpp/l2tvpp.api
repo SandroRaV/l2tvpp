@@ -117,7 +117,8 @@ define l2tvpp_session_details
 };
 
 /** \brief Enable/disable worker handoff by session index (for NICs whose
-    RSS cannot see the L2TP session id, e.g. ConnectX-4 Lx) */
+    RSS hashes only the outer UDP 4-tuple, so all of one LAC's sessions
+    land on one core) */
 autoreply define l2tvpp_set_handoff
 {
   u32 client_index;

@@ -17,10 +17,6 @@ Control messages (T bit) and all non-L2TPv2 traffic are passed untouched.
 Only applies when the Linux kernel owns the NIC. In VyOS VPP/DPDK mode the
 port belongs to VPP and native XDP has nothing to attach to.
 
-Related docs in this repo: `manuals/dgw/lns/config_manuals/vyos/vyos-l2tp-lns-tuning.md` (in the notes repo)
-(the RSS/RPS analysis and what does not work), `epyc-7f32-h12ssl-pppoe-dut.md`
-(the box), `vyos-l2tp-lns-bngblaster-epyc-7f32.md` (the measurement setup).
-
 ## 2. Files
 
 - `/path/to/l2tp-xdp/l2tp_steer.bpf.c`: the XDP program (no CO-RE, no vmlinux.h)
@@ -53,7 +49,7 @@ the control channel, accel-ppp and RADIUS):
 sudo /config/l2tp-steer/l2tp_steer -i eth8 -c 1-7
 ```
 
-Check it is doing something while BNG Blaster pushes traffic:
+Check it is doing something while a LAC pushes traffic:
 
 ```
 sudo /config/l2tp-steer/l2tp_steer -s -w 1
@@ -79,36 +75,26 @@ sudo /config/l2tp-steer/l2tp_steer -i eth8 -d
 /config/l2tp-steer/l2tp_steer -i eth8 -c 1-7
 ```
 
-## 6. ConnectX-4 Lx (mlx5) on the EPYC 7F32 box
+## 6. Mellanox ConnectX-4 / -4 Lx (mlx5)
 
-The EPYC DUT (`manuals/dgw/lns/config_manuals/epyc-7f32-h12ssl-pppoe-dut.md`)
-carries both test legs on a ConnectX-4 Lx (MT27710, `15b3:1015`, `mlx5_core`).
-On VyOS the access leg is `eth1` (`0000:81:00.0`) and the uplink `eth2`, so the
-attach line there is:
-
-```
-sudo /config/l2tp-steer/l2tp_steer -i eth1 -c 1-7
-```
-
-What matters for XDP on this card:
+A common LAC-facing NIC; what matters for XDP on it:
 
 - mlx5 has native XDP including `XDP_REDIRECT`, so CPUMAP redirect works in
   driver mode; no firmware requirement beyond what the card already runs
-  (`ethtool -i eth1` shows it; 14.32.1010 on the sister rig was fine).
+  (`ethtool -i eth1` shows the firmware version).
 - **MTU ceiling with XDP attached: 3498 bytes** on 4K pages (mlx5 switches to
-  one page per packet for XDP). The 1508 / 1600 transfer-net MTUs from the
-  LNS docs are far below that; the attach fails with an MTU error if someone
-  sets jumbo 9000 on `eth1`.
+  one page per packet for XDP). Typical L2TP transfer-net MTUs (1500-1600) are
+  well below that; the attach fails with an MTU error only if someone sets
+  jumbo 9000 on the interface.
 - mlx5 keeps hardware VLAN stripping on with XDP, so a tagged frame reaches
   the program without its tag. The parser handles both the tagged and the
-  stripped case, and on the EPYC rig the transfer net is untagged anyway.
+  stripped case; an untagged transfer net needs neither.
 - Attaching XDP re-creates the RX queues. Re-run the `ethtool -G` ring size,
-  `ethtool -L` channel count and the IRQ pinning from
-  `vyos/vyos-l2tp-lns-tuning.md` step 1 *before* attaching, and put the
-  attach last in the boot script.
-- The `ethtool -N eth1 rx-flow-hash udp4 sdfn` from the tuning doc stays
-  useful: it spreads *tunnels* in hardware, XDP then spreads *sessions* within
-  a tunnel. Both together give the finest spread.
+  `ethtool -L` channel count and any IRQ pinning *before* attaching, and put
+  the attach last in the boot script.
+- `ethtool -N eth1 rx-flow-hash udp4 sdfn` stays useful: it spreads *tunnels*
+  in hardware, XDP then spreads *sessions* within a tunnel. Both together give
+  the finest spread.
 - With 8C/16T, `-c 1-7` uses the physical cores' first threads; `-c 1-15`
   adds the SMT siblings. Benchmark both, SMT siblings do not give 2x for
   softirq work.
