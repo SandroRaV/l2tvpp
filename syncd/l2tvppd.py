@@ -378,7 +378,10 @@ def connect_vpp():
 def run_once(local_ip, local_port, state_path):
     vpp = connect_vpp()
     try:
-        return Syncd(vpp, local_ip, local_port, state_path).reconcile(
+        # real vpp_papi exposes API calls under vpp.api.<name>; the test
+        # framework's provider exposes them at the top level, so Syncd always
+        # gets an object whose l2tvpp_* / ip_route_add_del are top-level
+        return Syncd(vpp.api, local_ip, local_port, state_path).reconcile(
             kernel_sessions())
     finally:
         vpp.disconnect()
@@ -399,7 +402,7 @@ def connect_vpp_retry(interval):
 
 def run_daemon(local_ip, local_port, interval, state_path):
     vpp = connect_vpp_retry(interval)
-    sync = Syncd(vpp, local_ip, local_port, state_path)
+    sync = Syncd(vpp.api, local_ip, local_port, state_path)   # see run_once
     wake = {"now": True}
     signal.signal(signal.SIGHUP, lambda *_: wake.__setitem__("now", True))
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
