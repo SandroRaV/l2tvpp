@@ -53,6 +53,17 @@ Rig findings (2026-08-25, step 5/6 of the rig test), both fixed:
    path then merges with it. Fix: FIB_ENTRY_FLAG_NONE (the path is already
    attached via the host-prefix fixup); regression test
    `test_route_add_del_is_clean`.
+4. Benchmark day: the daemon's interval safety net never fired - run_daemon
+   gated every pass on the SIGHUP wake flag, which nothing sets after the
+   initial pass consumed it, so the service reconciled once at start and
+   then sat idle while showing active. A whole sweep "run C/D" silently
+   measured the kernel punt path (giveaway in `show errors`: millions of
+   `unknown session, punted`, plus `tap*-tx no free tx slots` - the tap
+   rings overflow around 300k pps, which is the kernel path's real loss
+   mechanism). Fixed: reconcile unconditionally every tick, SIGHUP only
+   shortens the sleep. Lesson for the rig doc: verify the data path
+   mid-sweep (`show errors` decapsulated climbing, `show l2tvpp session`
+   non-empty), never trust `systemctl is-active` alone.
 
 ## 3. Kernel side
 - [ ] For a `pppN` created by accel-ppp over L2TP: get tunnel id, session id, peer ip/port (`ip l2tp show session`, `/proc/net/pppol2tp`, genetlink `L2TP_CMD_SESSION_GET`)

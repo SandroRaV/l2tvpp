@@ -416,7 +416,7 @@ def connect_vpp_retry(interval):
 def run_daemon(local_ip, local_port, interval, state_path):
     vpp = connect_vpp_retry(interval)
     sync = Syncd(vpp.api, local_ip, local_port, state_path)   # see run_once
-    wake = {"now": True}
+    wake = {"now": False}
     signal.signal(signal.SIGHUP, lambda *_: wake.__setitem__("now", True))
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     log.info("l2tvppd up: reconcile every %ds (SIGHUP to poke), local-ip "
@@ -427,15 +427,19 @@ def run_daemon(local_ip, local_port, interval, state_path):
     ROUTE_RESYNC_EVERY = 6
     tick = 0
     try:
+        # reconcile UNCONDITIONALLY each iteration - this is the interval
+        # safety net; SIGHUP only cuts the sleep short. (Gating the pass on
+        # the wake flag meant the daemon reconciled once at start and then
+        # never again without a SIGHUP - found on the rig 2026-08-25 when a
+        # whole benchmark ran the kernel path with the daemon "active".)
         while True:
-            if wake["now"]:
-                wake["now"] = False
-                try:
-                    sync.reconcile(kernel_sessions(),
-                                   sync_existing_routes=(tick % ROUTE_RESYNC_EVERY == 0))
-                    tick += 1
-                except Exception:               # never let one bad pass kill the loop
-                    log.exception("reconcile failed; will retry")
+            wake["now"] = False
+            try:
+                sync.reconcile(kernel_sessions(),
+                               sync_existing_routes=(tick % ROUTE_RESYNC_EVERY == 0))
+                tick += 1
+            except Exception:               # never let one bad pass kill the loop
+                log.exception("reconcile failed; will retry")
             for _ in range(interval):
                 if wake["now"]:
                     break
