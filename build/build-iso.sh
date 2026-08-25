@@ -27,6 +27,10 @@ install -d "$INC/usr/libexec/l2tvpp" "$INC/lib/systemd/system"
 install -m 0755 "$REPO"/syncd/l2tvppd.py "$INC/usr/libexec/l2tvpp/l2tvppd.py"
 install -m 0644 "$REPO"/build/vyos-image/l2tvppd.service "$INC/lib/systemd/system/l2tvppd.service"
 
+# prune ISOs from previous builds (~700M each) so the build VM does not
+# fill up; they are regenerable and the installed image lives on the DUT
+sudo rm -f "$WORK"/vyos-build/build/*.iso
+
 docker run --rm $TTY -v "$WORK/vyos-build:/vyos" -w /vyos --privileged \
   "vyos/vyos-build:$BRANCH" \
   bash -c 'sudo make clean && sudo ./build-vyos-image generic --architecture amd64 --build-by l2tvpp --build-type release --version "$(date +%Y%m%d-%H%M)-l2tvpp"'
