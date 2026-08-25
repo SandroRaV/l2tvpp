@@ -186,6 +186,37 @@ class TestL2tvpp(VppTestCase):
         self.assertEqual(
             self.l2tvpp_input_error("decapsulated"), decap_before + 10)
 
+    def test_route_add_del_is_clean(self):
+        """a route add must create exactly one path - passing entry flags
+        to fib_table_entry_path_add2 makes the FIB materialize the new
+        source as a special drop path-list that then merges with the real
+        path (phantom drop bucket) - and a del must remove the source
+        entirely, or the high-priority source blackholes the prefix
+        instead of falling back to the kernel path"""
+        dump = self.vapi.cli("show ip fib %s/32" % SUB_IP)
+        self.assertNotIn("exclusive", dump)
+        self.assertIn("buckets:1", dump)
+
+        self.vapi.l2tvpp_route_add_del(
+            is_add=False, prefix=SUB_IP + "/32", sw_if_index=self.session)
+        dump = self.vapi.cli("show ip fib %s/32" % SUB_IP)
+        self.assertNotIn(SUB_IP + "/32", dump)
+
+        self.vapi.l2tvpp_route_add_del(
+            is_add=True, prefix=SUB_IP + "/32", sw_if_index=self.session)
+        dump = self.vapi.cli("show ip fib %s/32" % SUB_IP)
+        self.assertNotIn("exclusive", dump)
+        self.assertIn("buckets:1", dump)
+        p = (Ether(src=self.core.remote_mac, dst=self.core.local_mac)
+             / IP(src=self.core.remote_ip4, dst=SUB_IP)
+             / UDP(sport=5678, dport=1234))
+        self.pg_enable_capture(self.pg_interfaces)
+        self.core.add_stream([p] * 5)
+        self.pg_start()
+        rx = self.lac.get_capture(5)
+        for r in rx:
+            self.assertEqual(r[L2TP].session_id, PEER_SID)
+
     def test_route_source_beats_api_route(self):
         """the plugin's route source must outrank a competing API route for
         the same /32; on the LNS the competitor is linux-cp's lcp-rt mirror

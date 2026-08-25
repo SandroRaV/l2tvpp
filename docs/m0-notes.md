@@ -43,6 +43,16 @@ Rig findings (2026-08-25, step 5/6 of the rig test), both fixed:
    subscriber routes under its own FIB source at priority 0x0f
    (L2TVPP_FIB_SOURCE_PRIORITY), which outranks lcp-rt. The daemon uses it
    instead of ip_route_add_del.
+3. First route-API build on the rig: every subscriber /32 got a phantom
+   second load-balance bucket pointing at dpo-drop, and `l2tvpp route del`
+   left the prefix blackholed (the drop outlives the real path and the
+   high-priority source shadows lcp-rt). Cause: passing
+   FIB_ENTRY_FLAG_ATTACHED to fib_table_entry_path_add2 - on a
+   not-yet-sourced entry, non-NONE entry flags make fib_entry_src_api_add
+   materialize the source as a special drop path-list first, and the real
+   path then merges with it. Fix: FIB_ENTRY_FLAG_NONE (the path is already
+   attached via the host-prefix fixup); regression test
+   `test_route_add_del_is_clean`.
 
 ## 3. Kernel side
 - [ ] For a `pppN` created by accel-ppp over L2TP: get tunnel id, session id, peer ip/port (`ip l2tp show session`, `/proc/net/pppol2tp`, genetlink `L2TP_CMD_SESSION_GET`)

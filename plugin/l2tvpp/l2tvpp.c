@@ -393,9 +393,15 @@ l2tvpp_route_add_del (l2tvpp_main_t * lm, const fib_prefix_t * pfx,
   vec_add1 (rpaths, path);
   fib_index = fib_table_get_index_for_sw_if_index (pfx->fp_proto,
 						   sw_if_index);
+  /* entry flags must stay NONE: any other flag makes fib_entry_src_api_add
+   * materialize the new source as a special drop path-list first, and the
+   * real path then MERGES with that phantom drop instead of replacing it -
+   * and on remove, the drop outlives the path and blackholes the prefix
+   * (rig, 2026-08-25). The path itself is attached via the host-prefix
+   * fixup; no entry flag is needed. */
   if (is_add)
     fib_table_entry_path_add2 (fib_index, pfx, lm->fib_src,
-			       FIB_ENTRY_FLAG_ATTACHED, rpaths);
+			       FIB_ENTRY_FLAG_NONE, rpaths);
   else
     fib_table_entry_path_remove2 (fib_index, pfx, lm->fib_src, rpaths);
   vec_free (rpaths);
