@@ -190,22 +190,36 @@ class TestL2tvpp(VppTestCase):
         """the plugin's route source must outrank a competing API route for
         the same /32; on the LNS the competitor is linux-cp's lcp-rt mirror
         of the kernel session route (which also outranks API)"""
-        detour = VppIpRoute(self, SUB_IP, 32,
-                            [VppRoutePath(self.core.remote_ip4,
-                                          self.core.sw_if_index)])
-        detour.add_vpp_config()
-        p = (Ether(src=self.core.remote_mac, dst=self.core.local_mac)
-             / IP(src=self.core.remote_ip4, dst=SUB_IP)
-             / UDP(sport=5678, dport=1234))
-        self.pg_enable_capture(self.pg_interfaces)
-        self.core.add_stream([p] * 10)
-        self.pg_start()
-        # the l2tvpp route wins: traffic is encapped towards the LAC, not
-        # sent out the detour
-        rx = self.lac.get_capture(10)
-        for r in rx:
-            self.assertEqual(r[L2TP].session_id, PEER_SID)
-        detour.remove_vpp_config()
+        # raw vapi, not VppIpRoute: the registry's removal check would see
+        # the prefix still in the FIB (the class's l2tvpp-source route) and
+        # flag the teardown as failed
+        def detour(is_add):
+            path = {"sw_if_index": self.core.sw_if_index, "table_id": 0,
+                    "rpf_id": 0, "weight": 1, "preference": 0,
+                    "next_hop_id": 0xFFFFFFFF, "proto": 0, "type": 0,
+                    "flags": 0,
+                    "nh": {"address": {"ip4": self.core.remote_ip4}},
+                    "n_labels": 0, "label_stack": [{}] * 16}
+            self.vapi.ip_route_add_del(
+                is_add=is_add, is_multipath=0,
+                route={"table_id": 0, "prefix": SUB_IP + "/32",
+                       "n_paths": 1, "paths": [path]})
+
+        detour(1)
+        try:
+            p = (Ether(src=self.core.remote_mac, dst=self.core.local_mac)
+                 / IP(src=self.core.remote_ip4, dst=SUB_IP)
+                 / UDP(sport=5678, dport=1234))
+            self.pg_enable_capture(self.pg_interfaces)
+            self.core.add_stream([p] * 10)
+            self.pg_start()
+            # the l2tvpp route wins: traffic is encapped towards the LAC,
+            # not sent out the detour
+            rx = self.lac.get_capture(10)
+            for r in rx:
+                self.assertEqual(r[L2TP].session_id, PEER_SID)
+        finally:
+            detour(0)
 
 
 class TestL2tvppAddDel(VppTestCase):
