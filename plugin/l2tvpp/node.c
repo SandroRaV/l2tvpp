@@ -29,10 +29,11 @@ typedef enum
 
 #define foreach_l2tvpp_input_error                       \
   _ (DECAP, "decapsulated")                               \
+  _ (DECAP_SEQ, "sequenced, decapsulated")                \
   _ (PUNT_CONTROL, "control message, punted")             \
   _ (PUNT_NO_SESSION, "unknown session, punted")          \
   _ (PUNT_PPP_PROTO, "non-IP PPP protocol, punted")       \
-  _ (PUNT_UNSUPPORTED, "sequenced/offset/v3, punted")     \
+  _ (PUNT_UNSUPPORTED, "offset/v3, punted")               \
   _ (TOO_SHORT, "truncated, dropped")
 
 typedef enum
@@ -127,7 +128,7 @@ VLIB_NODE_FN (l2tvpp_input_node) (vlib_main_t * vm,
 	  error = L2TVPP_INPUT_ERROR_PUNT_CONTROL;
 	  goto punt;
 	}
-      if (PREDICT_FALSE (flags & (L2TVPP_HDR_S | L2TVPP_HDR_O)))
+      if (PREDICT_FALSE (flags & L2TVPP_HDR_O))
 	{
 	  error = L2TVPP_INPUT_ERROR_PUNT_UNSUPPORTED;
 	  goto punt;
@@ -139,6 +140,16 @@ VLIB_NODE_FN (l2tvpp_input_node) (vlib_main_t * vm,
       tid = clib_net_to_host_u16 (*(u16 *) cur);
       sid = clib_net_to_host_u16 (*(u16 *) (cur + 2));
       cur += 4;
+      /* Cisco LACs (ASR1001-X, Viavi bench 2026-08-25) send data with
+       * sequence numbers; RFC 2661 lets the receiver ignore them, so skip
+       * Ns/Nr and decap instead of punting - punting sent every upstream
+       * packet through the kernel at ~1/4 the rate. Encap stays
+       * unsequenced, which the same bench proved the LAC accepts. */
+      if (PREDICT_FALSE (flags & L2TVPP_HDR_S))
+	{
+	  cur += 4;
+	  error = L2TVPP_INPUT_ERROR_DECAP_SEQ;
+	}
 
       {
 	l2tvpp_session_key_t key;

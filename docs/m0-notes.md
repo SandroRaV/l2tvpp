@@ -72,10 +72,24 @@ Rig findings (2026-08-25, step 5/6 of the rig test), both fixed:
 Decision: event source and the data needed per session.
 
 ## 4. LAC behaviour (software LAC, vendor LNS/LAC, carrier)
-- [ ] Data sequencing (S bit) on data packets: on or off
+- [x] Data sequencing (S bit) on data packets: **the Cisco ASR1001-X LAC
+  sends sequenced data** (Viavi bench 2026-08-25 + TRex reproduction
+  2026-08-26 on the 5019D rig: crafted S-bit packets hit
+  `sequenced/offset/v3, punted` at the full offered rate). Punting them
+  sent all upstream traffic through the kernel: upstream capped at ~530k
+  pps on the DELTA E-2134 while downstream (our unsequenced encap, which
+  the ASR accepts) ran at the full 9.25 Gbit/s. ANSWERED by accepting
+  S-bit data in node.c: skip Ns/Nr per RFC 2661 (receiver may ignore data
+  sequence numbers), decap, count as "sequenced, decapsulated"; O bit and
+  v3 still punt. Baseline reproduction on the same rig: single session,
+  plain packets = 2.1 Mpps decap at 10G line rate, zero loss - the decap
+  path itself was never the problem. Provocation kit:
+  `l2tvpplast/lab/trex/`. BNG Blaster's LAC sends unsequenced data (the
+  rig never triggered this).
 - [ ] Outer UDP checksum 0 accepted?
 - [ ] Does the LAC follow a changed LNS source port (RFC 2661 requirement)?
-Decision: whether sequencing support is needed before M3.
+Decision (made): ignore-and-strip sequencing shipped before the M3 numbers;
+full reorder support stays unnecessary.
 
 ## 5. Build environment
 - [ ] VPP build host (Debian 12, `make install-dep`, `make build`) with the same VPP version as the target

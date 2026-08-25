@@ -144,6 +144,27 @@ class TestL2tvpp(VppTestCase):
         self.pg_start()
         self.core.assert_nothing_captured()
 
+    def test_sequenced_data_decaps(self):
+        """data with the S bit (Ns/Nr present) is decapsulated, not punted:
+        Cisco LACs (ASR1001-X) sequence their data packets, and punting
+        them sent all upstream traffic through the kernel (Viavi bench
+        2026-08-25)"""
+        inner = IP(src=SUB_IP, dst=self.core.remote_ip4) / UDP(sport=1, dport=2)
+        pkt = (Ether(src=self.lac.remote_mac, dst=self.lac.local_mac)
+               / IP(src=self.lac.remote_ip4, dst=self.lac.local_ip4)
+               / UDP(sport=L2TP_PORT, dport=L2TP_PORT)
+               / L2TP(hdr="length+sequence", tunnel_id=LOCAL_TID,
+                      session_id=LOCAL_SID, ns=7, nr=3)
+               / HDLC() / PPP(proto=0x0021) / inner)
+        self.pg_enable_capture(self.pg_interfaces)
+        self.lac.add_stream([pkt] * 10)
+        self.pg_start()
+        rx = self.core.get_capture(10)
+        for p in rx:
+            self.assertEqual(p[IP].src, SUB_IP)
+            self.assertFalse(p.haslayer(L2TP))
+        self.assertIn("sequenced, decapsulated", self.vapi.cli("show errors"))
+
     def test_lcp_is_punted(self):
         """PPP LCP (0xc021) inside a known session goes to the control plane"""
         pkt = self.l2tp_data(IP())
