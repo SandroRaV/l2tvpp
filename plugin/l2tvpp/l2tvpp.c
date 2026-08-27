@@ -464,6 +464,27 @@ VLIB_INIT_FUNCTION (l2tvpp_init) =
   .runs_after = VLIB_INITS ("udp_local_init"),
 };
 
+/* Handoff on by default when it can actually spread load: with 0 or 1
+ * workers it would only add the session peek plus a frame-queue hop to the
+ * same thread. The worker count is fixed by the time the main loop starts
+ * and no packets are flowing yet, so the udp/1701 registration can be
+ * swapped here without a barrier. CLI/API still override either way. */
+static clib_error_t *
+l2tvpp_handoff_default (vlib_main_t * vm)
+{
+  l2tvpp_main_t *lm = &l2tvpp_main;
+
+  if (vlib_num_workers () > 1)
+    {
+      udp_register_dst_port (vm, L2TVPP_UDP_PORT,
+			     l2tvpp_handoff_node.index, 1);
+      lm->handoff_enabled = 1;
+    }
+  return 0;
+}
+
+VLIB_MAIN_LOOP_ENTER_FUNCTION (l2tvpp_handoff_default);
+
 VLIB_PLUGIN_REGISTER () = {
   .version = VPP_BUILD_VER,
   .description = "L2TPv2 LNS data plane (l2tvpp)",

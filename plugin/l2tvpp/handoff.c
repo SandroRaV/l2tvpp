@@ -20,6 +20,9 @@
  *
  * All tunnels from one LAC share a single outer UDP 4-tuple, so NIC RSS puts
  * every session behind that LAC on one RX queue / worker (see design.md 3d).
+ * Handoff defaults to on when VPP runs with two or more workers (decided at
+ * main-loop enter, see l2tvpp.c) and stays off below that, where there is
+ * nothing to spread over; `l2tvpp handoff on|off` overrides either way.
  * When handoff is enabled, udp/1701 is delivered to this node instead of
  * l2tvpp-input; it parses just far enough to get the session index, picks a
  * worker by session_index % n_workers, and enqueues the buffer to

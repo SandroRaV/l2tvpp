@@ -408,9 +408,10 @@ if __name__ == "__main__":
 
 
 class TestL2tvppHandoff(VppTestCase):
-    """l2tvpp worker handoff: with handoff on and 2 workers, sessions still
-    decap/encap correctly (the handoff node picks a worker by session and
-    enqueues to l2tvpp-input there)."""
+    """l2tvpp worker handoff: with 2 workers handoff is on by default (no
+    l2tvpp_set_handoff call here), and sessions still decap/encap correctly
+    (the handoff node picks a worker by session and enqueues to
+    l2tvpp-input there)."""
 
     vpp_worker_count = 2
 
@@ -439,7 +440,7 @@ class TestL2tvppHandoff(VppTestCase):
             cls.vapi.l2tvpp_route_add_del(
                 is_add=True, prefix=sub + "/32", sw_if_index=swif)
             cls.subs[lsid] = (psid, sub)
-        cls.vapi.l2tvpp_set_handoff(enable=True)
+        # no l2tvpp_set_handoff here: 2 workers must mean handoff on by default
 
     def l2tp_data(self, lsid, inner):
         from scapy.layers.ppp import HDLC

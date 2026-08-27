@@ -231,16 +231,16 @@ l2tvpp_handoff_cli (vlib_main_t * vm, unformat_input_t * input,
 {
   l2tvpp_main_t *lm = &l2tvpp_main;
   unformat_input_t _line, *line = &_line;
-  u8 enable = 1;
+  u8 enable = 1, seen = 0;
 
   if (unformat_user (input, unformat_line_input, line))
     {
       while (unformat_check_input (line) != UNFORMAT_END_OF_INPUT)
 	{
 	  if (unformat (line, "on") || unformat (line, "enable"))
-	    enable = 1;
+	    enable = 1, seen = 1;
 	  else if (unformat (line, "off") || unformat (line, "disable"))
-	    enable = 0;
+	    enable = 0, seen = 1;
 	  else
 	    {
 	      unformat_free (line);
@@ -249,7 +249,9 @@ l2tvpp_handoff_cli (vlib_main_t * vm, unformat_input_t * input,
 	}
       unformat_free (line);
     }
-  l2tvpp_set_handoff (lm, enable);
+  /* bare "l2tvpp handoff" only shows the state */
+  if (seen)
+    l2tvpp_set_handoff (lm, enable);
   vlib_cli_output (vm, "l2tvpp worker handoff %s (%d workers)",
 		   lm->handoff_enabled ? "on" : "off", vlib_num_workers ());
   return 0;
