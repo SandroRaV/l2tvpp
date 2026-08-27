@@ -187,6 +187,48 @@ class TestL2tvpp(VppTestCase):
             self.assertEqual(p[IP].src, SUB_IP)
         self.assertIn("offset, decapsulated", self.vapi.cli("show errors"))
 
+    def test_all_data_flag_combinations(self):
+        """every legal L2TPv2 DATA header flag combination must decap:
+        all 16 of L/S/O/P, and for O both an empty and a 4-byte offset
+        pad - LACs differ in which they set (BNG Blaster: none; Cisco
+        ASR1001-X: O; other IOS builds: S)"""
+        inner = IP(src=SUB_IP, dst=self.core.remote_ip4) / UDP(sport=1, dport=2)
+        pkts = []
+        for l_bit in (0, 1):
+            for s_bit in (0, 1):
+                for o_bit in (0, 1):
+                    for p_bit in (0, 1):
+                        for pad in ((0, 4) if o_bit else (0,)):
+                            flags = (0x0002 | (0x4000 if l_bit else 0)
+                                     | (0x0800 if s_bit else 0)
+                                     | (0x0200 if o_bit else 0)
+                                     | (0x0100 if p_bit else 0))
+                            # order per RFC 2661: flags [len] tid sid
+                            # [Ns Nr] [offset size + pad] payload
+                            rest = struct.pack('!HH', LOCAL_TID, LOCAL_SID)
+                            if s_bit:
+                                rest += struct.pack('!HH', 0, 0)
+                            if o_bit:
+                                rest += struct.pack('!H', pad) + b'\x00' * pad
+                            rest += b'\xff\x03\x00\x21' + bytes(inner)
+                            hdr = struct.pack('!H', flags)
+                            if l_bit:
+                                hdr += struct.pack('!H', 2 + 2 + len(rest))
+                            pkts.append(
+                                Ether(src=self.lac.remote_mac,
+                                      dst=self.lac.local_mac)
+                                / IP(src=self.lac.remote_ip4,
+                                     dst=self.lac.local_ip4)
+                                / UDP(sport=L2TP_PORT, dport=L2TP_PORT)
+                                / Raw(hdr + rest))
+        self.pg_enable_capture(self.pg_interfaces)
+        self.lac.add_stream(pkts)
+        self.pg_start()
+        rx = self.core.get_capture(len(pkts))
+        for p in rx:
+            self.assertEqual(p[IP].src, SUB_IP)
+            self.assertFalse(p.haslayer(L2TP))
+
     def test_offset_garbage_size_dropped(self):
         """an offset size pointing past the buffer must drop, not decap
         or crash (the S/O advances are attacker-controlled)"""
