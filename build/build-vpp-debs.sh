@@ -33,14 +33,23 @@ PKGDIR="$WORK/vyos-build/scripts/package-build/vpp"
 rm -rf "$PKGDIR/vpp"
 rm -f "$PKGDIR"/vpp_stable_*.tar.gz "$PKGDIR"/*.deb "$PKGDIR"/*.buildinfo "$PKGDIR"/*.changes "$OUT"/*.deb
 
+# compiler cache on a persistent volume: VPP's cmake uses ccache when it is
+# on PATH (src/cmake/ccache.cmake, VPP_USE_CCACHE=ON), and the cache is
+# content-addressed, so it survives the clean-tree wipe above and turns the
+# full rebuild into mostly cache hits after the first run
+CCACHE_VOL="$WORK/ccache"
+mkdir -p "$CCACHE_VOL"
+
 docker pull "vyos/vyos-build:$BRANCH"
 docker run --rm $TTY \
   -v "$WORK/vyos-build:/vyos" \
   -v "$REPO:/l2tvpp:ro" \
+  -v "$CCACHE_VOL:/ccache" \
+  -e CCACHE_DIR=/ccache \
   -w /vyos/scripts/package-build/vpp \
   --privileged \
   "vyos/vyos-build:$BRANCH" \
-  bash -c './build.py'
+  bash -c 'command -v ccache >/dev/null || { sudo apt-get -qq update && sudo apt-get -qq -y install ccache; }; ./build.py'
 
 cp "$WORK"/vyos-build/scripts/package-build/vpp/*.deb "$OUT/"
 ls -la "$OUT"
