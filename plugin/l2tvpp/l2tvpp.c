@@ -303,6 +303,7 @@ l2tvpp_session_add_del (l2tvpp_main_t * lm, u32 tunnel_index,
 
       pool_get_zero (lm->sessions, sess);
       sess->tunnel_index = tunnel_index;
+      sess->local_tid = t->local_tid;
       sess->local_sid = local_sid;
       sess->peer_sid = peer_sid;
       sess->acfc = acfc;

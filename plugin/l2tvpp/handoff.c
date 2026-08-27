@@ -94,7 +94,12 @@ l2tvpp_peek_session (l2tvpp_main_t * lm, vlib_buffer_t * b)
    * always maps to one worker (l2tvpp-input ignores Ns/Nr anyway) */
   cur += 2;
   if (flags & L2TVPP_HDR_L)
-    cur += 2;
+    {
+      /* the L bit pushes tid/sid to bytes 6-7 */
+      if (PREDICT_FALSE (b->current_length < 8))
+	return ~0;
+      cur += 2;
+    }
   tid = clib_net_to_host_u16 (*(u16 *) cur);
   sid = clib_net_to_host_u16 (*(u16 *) (cur + 2));
 
@@ -122,7 +127,18 @@ VLIB_NODE_FN (l2tvpp_handoff_node) (vlib_main_t * vm,
 
   for (i = 0; i < n; i++)
     {
-      u32 si = l2tvpp_peek_session (lm, b[i]);
+      u32 si;
+
+      if (PREDICT_TRUE (i + 4 < n))
+	{
+	  vlib_prefetch_buffer_header (b[i + 4], LOAD);
+	  clib_prefetch_load (vlib_buffer_get_current (b[i + 2]));
+	}
+
+      si = l2tvpp_peek_session (lm, b[i]);
+      /* pass the lookup result to l2tvpp-input, which validates it against
+       * the header before use (a pool slot can be reused by a delete) */
+      vnet_buffer (b[i])->l2t.session_index = si;
       /* worker threads are 1 .. n_workers; keep unresolved packets local */
       ti[i] = (si == ~0 || n_workers == 0) ? this_thread
 	: (u16) (1 + (si % n_workers));

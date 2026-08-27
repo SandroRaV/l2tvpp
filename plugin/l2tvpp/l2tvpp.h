@@ -62,6 +62,8 @@ typedef struct
 typedef struct
 {
   u32 tunnel_index;
+  u16 local_tid;		/* cached from the tunnel: lets l2tvpp-input
+				 * validate the handoff hint with one load */
   u16 local_sid;		/* in packets from the LAC */
   u16 peer_sid;			/* in packets to the LAC */
   u8 acfc;

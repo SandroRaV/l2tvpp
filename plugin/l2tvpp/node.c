@@ -102,6 +102,12 @@ VLIB_NODE_FN (l2tvpp_input_node) (vlib_main_t * vm,
       vlib_buffer_t *b0 = b[0];
       u8 *cur;
       u16 flags, tid, sid, ppp_proto = 0;
+
+      if (PREDICT_TRUE (n_left > 4))
+	{
+	  vlib_prefetch_buffer_header (b[4], LOAD);
+	  clib_prefetch_load (vlib_buffer_get_current (b[2]));
+	}
       u32 session_index = ~0, error = L2TVPP_INPUT_ERROR_DECAP;
       u32 next0;
 
@@ -131,7 +137,17 @@ VLIB_NODE_FN (l2tvpp_input_node) (vlib_main_t * vm,
 	}
       cur += 2;
       if (flags & L2TVPP_HDR_L)
-	cur += 2;
+	{
+	  /* the L bit pushes tid/sid to bytes 6-7 - re-check the length
+	   * so they are not read from past the buffer */
+	  if (PREDICT_FALSE (b0->current_length < 8))
+	    {
+	      error = L2TVPP_INPUT_ERROR_TOO_SHORT;
+	      next0 = L2TVPP_INPUT_NEXT_DROP;
+	      goto trace;
+	    }
+	  cur += 2;
+	}
       tid = clib_net_to_host_u16 (*(u16 *) cur);
       sid = clib_net_to_host_u16 (*(u16 *) (cur + 2));
       cur += 4;
@@ -167,16 +183,35 @@ VLIB_NODE_FN (l2tvpp_input_node) (vlib_main_t * vm,
       {
 	l2tvpp_session_key_t key;
 	clib_bihash_kv_16_8_t kv;
-	l2tvpp_make_key (&key, tid, sid);
-	kv.key[0] = key.as_u64[0];
-	kv.key[1] = key.as_u64[1];
-	if (PREDICT_FALSE (clib_bihash_search_inline_16_8
-			   (&lm->session_by_key, &kv)))
+
+	/* with handoff on, every frame came through l2tvpp-handoff, which
+	 * already did this lookup and left the result in the buffer; a
+	 * pool slot can be reused by a delete between the two nodes, so
+	 * the hint only counts if the entry still matches the header key
+	 * ((tid, sid) is unique, so a match is authoritative) */
+	if (lm->handoff_enabled)
 	  {
-	    error = L2TVPP_INPUT_ERROR_PUNT_NO_SESSION;
-	    goto punt;
+	    u32 hint = vnet_buffer (b0)->l2t.session_index;
+	    if (hint != ~0 && !pool_is_free_index (lm->sessions, hint))
+	      {
+		l2tvpp_session_t *s = pool_elt_at_index (lm->sessions, hint);
+		if (s->local_tid == tid && s->local_sid == sid)
+		  session_index = hint;
+	      }
 	  }
-	session_index = kv.value;
+	if (session_index == ~0)
+	  {
+	    l2tvpp_make_key (&key, tid, sid);
+	    kv.key[0] = key.as_u64[0];
+	    kv.key[1] = key.as_u64[1];
+	    if (PREDICT_FALSE (clib_bihash_search_inline_16_8
+			       (&lm->session_by_key, &kv)))
+	      {
+		error = L2TVPP_INPUT_ERROR_PUNT_NO_SESSION;
+		goto punt;
+	      }
+	    session_index = kv.value;
+	  }
       }
 
       /* PPP: optional FF 03, then 1- or 2-byte protocol (PFC if the

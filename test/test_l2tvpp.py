@@ -243,6 +243,21 @@ class TestL2tvpp(VppTestCase):
         self.core.assert_nothing_captured()
         self.assertIn("truncated, dropped", self.vapi.cli("show errors"))
 
+    def test_l_bit_truncated_dropped(self):
+        """an L-bit header cut off before tid/sid (bytes 6-7 with L set)
+        must drop as truncated, not read the ids from past the buffer"""
+        pkt = (Ether(src=self.lac.remote_mac, dst=self.lac.local_mac)
+               / IP(src=self.lac.remote_ip4, dst=self.lac.local_ip4)
+               / UDP(sport=L2TP_PORT, dport=L2TP_PORT)
+               / Raw(struct.pack('!HHH', 0x4002, 6, LOCAL_TID)))
+        before = self.l2tvpp_input_error("truncated, dropped")
+        self.pg_enable_capture(self.pg_interfaces)
+        self.lac.add_stream([pkt])
+        self.pg_start()
+        self.core.assert_nothing_captured()
+        self.assertEqual(self.l2tvpp_input_error("truncated, dropped"),
+                         before + 1)
+
     def test_lcp_is_punted(self):
         """PPP LCP (0xc021) inside a known session goes to the control plane"""
         pkt = self.l2tp_data(IP())
