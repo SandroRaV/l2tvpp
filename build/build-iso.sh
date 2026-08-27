@@ -36,3 +36,13 @@ docker run --rm $TTY -v "$WORK/vyos-build:/vyos" -w /vyos --privileged \
   bash -c 'sudo make clean && sudo ./build-vyos-image generic --architecture amd64 --build-by l2tvpp --build-type release --version "$(date +%Y%m%d-%H%M)-l2tvpp"'
 
 ls -la "$WORK"/vyos-build/build/*.iso
+
+# publish the finished ISO to the download host (ssh key on the build VM);
+# an upload failure must not fail the build - copy by hand then
+ISO=$(ls -t "$WORK"/vyos-build/build/vyos-*-l2tvpp-generic-amd64.iso 2>/dev/null | head -1)
+if [ -n "$ISO" ]; then
+  scp -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+    "$ISO" sandro@docker02.ravana.me:/home/sandro/webserver/data/ \
+    && echo "published: /home/sandro/webserver/data/$(basename "$ISO") on docker02.ravana.me" \
+    || echo "WARNING: upload to docker02.ravana.me failed - copy $ISO by hand"
+fi
