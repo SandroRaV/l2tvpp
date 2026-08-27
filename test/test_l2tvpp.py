@@ -9,6 +9,7 @@ Topology: pg0 is the access side (the LAC lives at pg0.remote), pg1 is the
 core/uplink. One L2TPv2 tunnel + session is set up once for the class; the
 subscriber 10.200.0.5/32 routes out the session interface.
 """
+import struct
 import unittest
 
 from framework import VppTestCase
@@ -17,6 +18,7 @@ from scapy.layers.l2 import Ether
 from scapy.layers.inet import IP, UDP
 from scapy.layers.l2tp import L2TP
 from scapy.layers.ppp import PPP, HDLC
+from scapy.packet import Raw
 from vpp_ip import VppIpPuntRedirect
 from vpp_ip_route import VppIpRoute, VppRoutePath
 from vpp_neighbor import VppNeighbor
@@ -164,6 +166,40 @@ class TestL2tvpp(VppTestCase):
             self.assertEqual(p[IP].src, SUB_IP)
             self.assertFalse(p.haslayer(L2TP))
         self.assertIn("sequenced, decapsulated", self.vapi.cli("show errors"))
+
+    def test_offset_data_decaps(self):
+        """data with the O bit (offset size 0, the other Cisco quirk -
+        found on the ASR1001-X after the S fix, Viavi bench 2026-08-27)
+        is decapsulated, not punted"""
+        inner = IP(src=SUB_IP, dst=self.core.remote_ip4) / UDP(sport=1, dport=2)
+        # flags O|ver2, tid, sid, offset size 0 - raw-crafted, scapy's L2TP
+        # layer does not model the offset field
+        hdr = struct.pack('!HHHH', 0x0202, LOCAL_TID, LOCAL_SID, 0)
+        pkt = (Ether(src=self.lac.remote_mac, dst=self.lac.local_mac)
+               / IP(src=self.lac.remote_ip4, dst=self.lac.local_ip4)
+               / UDP(sport=L2TP_PORT, dport=L2TP_PORT)
+               / Raw(hdr + b'\xff\x03\x00\x21' + bytes(inner)))
+        self.pg_enable_capture(self.pg_interfaces)
+        self.lac.add_stream([pkt] * 10)
+        self.pg_start()
+        rx = self.core.get_capture(10)
+        for p in rx:
+            self.assertEqual(p[IP].src, SUB_IP)
+        self.assertIn("offset, decapsulated", self.vapi.cli("show errors"))
+
+    def test_offset_garbage_size_dropped(self):
+        """an offset size pointing past the buffer must drop, not decap
+        or crash (the S/O advances are attacker-controlled)"""
+        hdr = struct.pack('!HHHH', 0x0202, LOCAL_TID, LOCAL_SID, 0xFFFF)
+        pkt = (Ether(src=self.lac.remote_mac, dst=self.lac.local_mac)
+               / IP(src=self.lac.remote_ip4, dst=self.lac.local_ip4)
+               / UDP(sport=L2TP_PORT, dport=L2TP_PORT)
+               / Raw(hdr + b'\x00' * 32))
+        self.pg_enable_capture(self.pg_interfaces)
+        self.lac.add_stream([pkt])
+        self.pg_start()
+        self.core.assert_nothing_captured()
+        self.assertIn("truncated, dropped", self.vapi.cli("show errors"))
 
     def test_lcp_is_punted(self):
         """PPP LCP (0xc021) inside a known session goes to the control plane"""

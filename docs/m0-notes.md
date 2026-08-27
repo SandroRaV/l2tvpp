@@ -85,7 +85,12 @@ Decision: event source and the data needed per session.
   plain packets = 2.1 Mpps decap at 10G line rate, zero loss - the decap
   path itself was never the problem. Provocation kit:
   `l2tvpplast/lab/trex/`. BNG Blaster's LAC sends unsequenced data (the
-  rig never triggered this).
+  rig never triggered this). SECOND Cisco quirk (Viavi re-bench 2026-08-27,
+  first fixed image): with S accepted, upstream STILL punted - now as
+  "offset/v3": the ASR also sets the O bit (offset field). Fixed the same
+  way: skip offset size + pad, decap, count "offset, decapsulated"; a
+  bounds guard drops garbage offset sizes (attacker-controlled advance).
+  Only non-v2 versions punt now.
 - [ ] Outer UDP checksum 0 accepted?
 - [ ] Does the LAC follow a changed LNS source port (RFC 2661 requirement)?
 Decision (made): ignore-and-strip sequencing shipped before the M3 numbers;

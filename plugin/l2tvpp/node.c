@@ -30,10 +30,11 @@ typedef enum
 #define foreach_l2tvpp_input_error                       \
   _ (DECAP, "decapsulated")                               \
   _ (DECAP_SEQ, "sequenced, decapsulated")                \
+  _ (DECAP_OFF, "offset, decapsulated")                   \
   _ (PUNT_CONTROL, "control message, punted")             \
   _ (PUNT_NO_SESSION, "unknown session, punted")          \
   _ (PUNT_PPP_PROTO, "non-IP PPP protocol, punted")       \
-  _ (PUNT_UNSUPPORTED, "offset/v3, punted")               \
+  _ (PUNT_UNSUPPORTED, "not v2, punted")                  \
   _ (TOO_SHORT, "truncated, dropped")
 
 typedef enum
@@ -128,27 +129,39 @@ VLIB_NODE_FN (l2tvpp_input_node) (vlib_main_t * vm,
 	  error = L2TVPP_INPUT_ERROR_PUNT_CONTROL;
 	  goto punt;
 	}
-      if (PREDICT_FALSE (flags & L2TVPP_HDR_O))
-	{
-	  error = L2TVPP_INPUT_ERROR_PUNT_UNSUPPORTED;
-	  goto punt;
-	}
-
       cur += 2;
       if (flags & L2TVPP_HDR_L)
 	cur += 2;
       tid = clib_net_to_host_u16 (*(u16 *) cur);
       sid = clib_net_to_host_u16 (*(u16 *) (cur + 2));
       cur += 4;
-      /* Cisco LACs (ASR1001-X, Viavi bench 2026-08-25) send data with
-       * sequence numbers; RFC 2661 lets the receiver ignore them, so skip
-       * Ns/Nr and decap instead of punting - punting sent every upstream
-       * packet through the kernel at ~1/4 the rate. Encap stays
-       * unsequenced, which the same bench proved the LAC accepts. */
+      /* Cisco LACs (ASR1001-X, Viavi bench 2026-08-25/27) send data with
+       * sequence numbers and/or the offset bit (typically offset size 0);
+       * RFC 2661 lets the receiver ignore sequence numbers and the offset
+       * pad carries nothing, so skip both and decap instead of punting -
+       * punting sent every upstream packet through the kernel at ~1/4 the
+       * rate. Encap stays plain (no S/O), which the same bench proved the
+       * LAC accepts. */
       if (PREDICT_FALSE (flags & L2TVPP_HDR_S))
 	{
 	  cur += 4;
 	  error = L2TVPP_INPUT_ERROR_DECAP_SEQ;
+	}
+      if (PREDICT_FALSE (flags & L2TVPP_HDR_O))
+	{
+	  cur += 2 + clib_net_to_host_u16 (*(u16 *) cur);
+	  error = L2TVPP_INPUT_ERROR_DECAP_OFF;
+	}
+      /* S/O advances are attacker-controlled (offset size field): make
+       * sure the PPP header we are about to read is still inside the
+       * buffer */
+      if (PREDICT_FALSE (cur + 4 >
+			 (u8 *) vlib_buffer_get_current (b0) +
+			 b0->current_length))
+	{
+	  error = L2TVPP_INPUT_ERROR_TOO_SHORT;
+	  next0 = L2TVPP_INPUT_NEXT_DROP;
+	  goto trace;
 	}
 
       {
