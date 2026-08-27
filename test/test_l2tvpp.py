@@ -468,6 +468,30 @@ class TestL2tvppHandoff(VppTestCase):
         # the handoff node must actually have run
         self.assertIn("l2tvpp-handoff", self.vapi.cli("show runtime"))
 
+    def test_handoff_decap_sequenced(self):
+        """S-bit data is handed off by session like plain data (tid/sid sit
+        before Ns/Nr, and one session always maps to one worker)"""
+        from scapy.layers.ppp import HDLC
+        pkts = []
+        for lsid, (_psid, sub) in self.subs.items():
+            inner = IP(src=sub, dst=self.pg1.remote_ip4) / UDP(sport=3, dport=4)
+            pkts += [(Ether(src=self.pg0.remote_mac, dst=self.pg0.local_mac)
+                      / IP(src=self.pg0.remote_ip4, dst=self.pg0.local_ip4)
+                      / UDP(sport=L2TP_PORT, dport=L2TP_PORT)
+                      / L2TP(hdr="length+sequence", tunnel_id=LOCAL_TID,
+                             session_id=lsid)
+                      / HDLC() / PPP(proto=0x0021) / inner)] * 8
+        self.pg_enable_capture(self.pg_interfaces)
+        self.pg0.add_stream(pkts)
+        self.pg_start()
+        rx = self.pg1.get_capture(16)
+        seen = set()
+        for p in rx:
+            self.assertFalse(p.haslayer(L2TP))
+            seen.add(p[IP].src)
+        self.assertEqual(seen, {s for _p, s in self.subs.values()})
+        self.assertIn("sequenced, decapsulated", self.vapi.cli("show errors"))
+
     def test_handoff_encap(self):
         """downstream encap still works with handoff enabled"""
         _psid, sub = self.subs[1000]

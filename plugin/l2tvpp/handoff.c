@@ -32,7 +32,9 @@
  *
  * Packets we cannot resolve to a session (control, unknown session,
  * truncated, v3) are kept on the current thread; l2tvpp-input punts/drops
- * them there, exactly as without handoff.
+ * them there, exactly as without handoff. Data with the S or O bit (the
+ * ASR quirks) is handed off like plain data: the session key is read from
+ * the same header positions, and ordering is safe session-by-session.
  */
 #include <vlib/vlib.h>
 #include <vnet/vnet.h>
@@ -85,8 +87,11 @@ l2tvpp_peek_session (l2tvpp_main_t * lm, vlib_buffer_t * b)
   flags = clib_net_to_host_u16 (*(u16 *) cur);
   if ((flags & L2TVPP_HDR_VER) != 2)
     return ~0;
-  if (flags & (L2TVPP_HDR_T | L2TVPP_HDR_S | L2TVPP_HDR_O))
-    return ~0;			/* control / sequenced / offset: keep local */
+  if (flags & L2TVPP_HDR_T)
+    return ~0;			/* control: keep local, l2tvpp-input punts it */
+  /* S/O data is spread like plain data: tid/sid sit before the Ns/Nr and
+   * offset fields, and per-session ordering holds because one session
+   * always maps to one worker (l2tvpp-input ignores Ns/Nr anyway) */
   cur += 2;
   if (flags & L2TVPP_HDR_L)
     cur += 2;
