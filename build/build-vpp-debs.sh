@@ -25,6 +25,14 @@ fi
 # to see the single addition).
 cp "$REPO/build/package.toml" "$WORK/vyos-build/scripts/package-build/vpp/package.toml"
 
+# build.py re-applies the VyOS patches with git am, which fails on the vpp
+# checkout a previous run leaves behind (patches already applied, l2tvpp
+# already committed) - start every build from a clean tree, and drop the old
+# debs here and in build/out so only this build's set reaches the ISO
+PKGDIR="$WORK/vyos-build/scripts/package-build/vpp"
+rm -rf "$PKGDIR/vpp"
+rm -f "$PKGDIR"/vpp_stable_*.tar.gz "$PKGDIR"/*.deb "$PKGDIR"/*.buildinfo "$PKGDIR"/*.changes "$OUT"/*.deb
+
 docker pull "vyos/vyos-build:$BRANCH"
 docker run --rm $TTY \
   -v "$WORK/vyos-build:/vyos" \
