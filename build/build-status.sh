@@ -5,8 +5,8 @@
 # newest /home/sandro/l2tvpp-build-*.log on the build box (the log the build
 # chain writes), so it works while a build runs and after it finished.
 #
-#   /Users/sandro/Nextclouds/cl0ud/04_AI/01_claude/l2tvpp/build/build-status.sh      # one shot
-#   /Users/sandro/Nextclouds/cl0ud/04_AI/01_claude/l2tvpp/build/build-status.sh -w   # refresh every 30 s
+#   build/build-status.sh      # one shot
+#   build/build-status.sh -w   # refresh every 30 s
 #
 # The build machine is site-specific and not part of the repo: set
 # BUILD_BOX=user@host in the environment, or put the user@host line in
