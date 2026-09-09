@@ -87,13 +87,13 @@ row 3 "VPP compile" "$NINJADET"
 row 4 "deb packaging" "${DEBS:+$DEBS debs}"
 row 5 "ISO build (live-build)" "${LB:+last: ${LB:0:60}}"
 if [ -n "$PUBLISHED" ]; then
-  row 6 "upload to docker02.ravana.me" "OK"
+  row 6 "upload to the download host" "OK"
   echo; echo "$PUBLISHED"
 elif [ -n "$UPFAIL" ]; then
-  row 6 "upload to docker02.ravana.me" "FAILED"
+  row 6 "upload to the download host" "FAILED"
   echo; echo "$UPFAIL"
 else
-  row 6 "upload to docker02.ravana.me"
+  row 6 "upload to the download host"
 fi
 
 echo

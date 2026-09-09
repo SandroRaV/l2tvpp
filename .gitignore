@@ -7,3 +7,4 @@ __pycache__/
 .DS_Store
 build/ci-logs/
 build/build-box.local
+\nbuild/publish.local\n

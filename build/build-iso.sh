@@ -37,12 +37,18 @@ docker run --rm $TTY -v "$WORK/vyos-build:/vyos" -w /vyos --privileged \
 
 ls -la "$WORK"/vyos-build/build/*.iso
 
-# publish the finished ISO to the download host (ssh key on the build VM);
-# an upload failure must not fail the build - copy by hand then
+# publish the finished ISO to the download host. The destination is site-specific
+# and not part of the repo: set PUBLISH_DEST=user@host:/dir in the environment, or
+# put that line in build/publish.local (gitignored) next to this script. An upload
+# failure must not fail the build - copy by hand then.
+LOCALPUB="$REPO/build/publish.local"
+DEST="${PUBLISH_DEST:-}"
+[ -z "$DEST" ] && [ -f "$LOCALPUB" ] && DEST=$(head -1 "$LOCALPUB")
 ISO=$(ls -t "$WORK"/vyos-build/build/vyos-*-l2tvpp-generic-amd64.iso 2>/dev/null | head -1)
-if [ -n "$ISO" ]; then
-  scp -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
-    "$ISO" sandro@docker02.ravana.me:/home/sandro/webserver/data/ \
-    && echo "published: /home/sandro/webserver/data/$(basename "$ISO") on docker02.ravana.me" \
-    || echo "WARNING: upload to docker02.ravana.me failed - copy $ISO by hand"
+if [ -n "$ISO" ] && [ -n "$DEST" ]; then
+  scp -o BatchMode=yes -o StrictHostKeyChecking=accept-new "$ISO" "$DEST/" \
+    && echo "published: $(basename "$ISO") to $DEST" \
+    || echo "WARNING: upload of $(basename "$ISO") to $DEST failed - copy $ISO by hand"
+elif [ -n "$ISO" ]; then
+  echo "not published: set PUBLISH_DEST=user@host:/dir or write it to $LOCALPUB"
 fi

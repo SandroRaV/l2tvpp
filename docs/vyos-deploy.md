@@ -81,6 +81,10 @@ persistent install use path 2.
 ls build/work/vyos-build/build/*.iso
 ```
 
+`build-iso.sh` uploads the finished ISO to a download host when
+`PUBLISH_DEST=user@host:/dir` is set or `build/publish.local` (gitignored) holds that
+line; without either it only prints where the ISO is.
+
 Install that ISO the normal way (`add system image <iso>` from a running
 VyOS, or a fresh install). The plugin is part of the image's VPP and
 survives upgrades within that image.
