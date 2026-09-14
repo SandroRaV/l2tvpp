@@ -151,6 +151,21 @@ dedicated rx/classify worker. A single rx queue caps the receivable rate at
 ~one core of dpdk-input + classify (~320 clocks/pkt), so the rx/classify
 worker, not decap, is the wall above ~11 Mpps per direction.
 
+**Encap fast path (`encap_fastpath.c`, added 2026-09-14).** The decap fast
+path left the encap direction (uplink -> subscriber) as the heavier side: on
+the EPYC/Viavi bench with one worker per direction it saturated ~2 Mpps below
+decap because every packet still went ethernet-input -> ip4-input -> ip4-lookup
+-> ip4-midchain. `l2tvpp-encap-fastpath` is a device-input feature on the
+uplink that reads the inner IPv4 destination, looks it up in a subscriber->
+midchain-adjacency cache (`encap_adj_by_ip4`, filled by `l2tvpp_route_add_del`
+with `adj_nbr_add_or_lock`), and on a hit strips L2, sets
+`ip.adj_index[VLIB_TX]` and jumps straight to `ip4-midchain` - skipping
+ethernet-input, ip4-input and ip4-lookup. ip4-midchain still does the TTL
+decrement, checksum, rewrite and fixup, so forwarding is unchanged; only the
+lookup is shortcut. IPv4, unfragmented, no options only; everything else goes
+to ethernet-input. Enable with `l2tvpp encap-fastpath <uplink> [disable]`,
+inspect with `show l2tvpp encap-fastpath`.
+
 ### 3e. API and CLI
 
 `l2tvpp.api`:

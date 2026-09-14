@@ -18,6 +18,7 @@
 #include <vpp/app/version.h>
 #include <vnet/adj/adj_midchain.h>
 #include <vnet/adj/adj_nbr.h>
+#include <vppinfra/bihash_8_8.h>
 #include <vnet/fib/fib_table.h>
 #include <vnet/ip/ip4_packet.h>
 #include <vnet/udp/udp_packet.h>
@@ -379,6 +380,57 @@ l2tvpp_session_add_del (l2tvpp_main_t * lm, u32 tunnel_index,
  * outrank linux-cp's mirror of the kernel session route (lcp-rt), which
  * an API-source route cannot (see L2TVPP_FIB_SOURCE_PRIORITY)
  */
+/* encap fast-path adjacency cache: lazily created, keyed by subscriber
+ * dst IPv4, value = the session's midchain adj_index (locked while cached) */
+static void
+l2tvpp_encap_adj_init (l2tvpp_main_t * lm)
+{
+  if (lm->encap_adj_init)
+    return;
+  clib_bihash_init_8_8 (&lm->encap_adj_by_ip4, "l2tvpp encap adj",
+			64 * 1024, 16 << 20);
+  lm->encap_adj_init = 1;
+}
+
+/* add (is_add) or remove the subscriber -> midchain-adj mapping used by
+ * l2tvpp-encap-fastpath; IPv4 /32 only (the fast path is IPv4-only) */
+static void
+l2tvpp_encap_adj_add_del (l2tvpp_main_t * lm, const fib_prefix_t * pfx,
+			  u32 sw_if_index, u8 is_add)
+{
+  clib_bihash_kv_8_8_t kv;
+  ip46_address_t nh;
+
+  if (pfx->fp_proto != FIB_PROTOCOL_IP4 || pfx->fp_len != 32)
+    return;
+  l2tvpp_encap_adj_init (lm);
+  kv.key = pfx->fp_addr.ip4.as_u32;
+
+  if (is_add)
+    {
+      adj_index_t ai;
+      /* same neighbour adjacency ip4-lookup resolves this /32 to: a lock
+       * keeps it alive for the cache, released on remove */
+      clib_memset (&nh, 0, sizeof (nh));
+      nh.ip4 = pfx->fp_addr.ip4;
+      ai = adj_nbr_add_or_lock (FIB_PROTOCOL_IP4, VNET_LINK_IP4, &nh,
+				sw_if_index);
+      kv.value = ai;
+      if (!clib_bihash_add_del_8_8 (&lm->encap_adj_by_ip4, &kv, 1))
+	lm->encap_adj_count++;
+    }
+  else
+    {
+      if (!clib_bihash_search_8_8 (&lm->encap_adj_by_ip4, &kv, &kv))
+	{
+	  clib_bihash_add_del_8_8 (&lm->encap_adj_by_ip4, &kv, 0);
+	  adj_unlock ((adj_index_t) kv.value);
+	  if (lm->encap_adj_count)
+	    lm->encap_adj_count--;
+	}
+    }
+}
+
 int
 l2tvpp_route_add_del (l2tvpp_main_t * lm, const fib_prefix_t * pfx,
 		      u32 sw_if_index, u8 is_add)
@@ -411,6 +463,7 @@ l2tvpp_route_add_del (l2tvpp_main_t * lm, const fib_prefix_t * pfx,
 			       FIB_ENTRY_FLAG_NONE, rpaths);
   else
     fib_table_entry_path_remove2 (fib_index, pfx, lm->fib_src, rpaths);
+  l2tvpp_encap_adj_add_del (lm, pfx, sw_if_index, is_add);
   vec_free (rpaths);
   return 0;
 }

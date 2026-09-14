@@ -9,6 +9,7 @@ add_vpp_plugin(l2tvpp
   node.c
   handoff.c
   flow_handoff.c
+  encap_fastpath.c
 
   API_FILES
   l2tvpp.api

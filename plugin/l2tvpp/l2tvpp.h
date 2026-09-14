@@ -25,6 +25,7 @@
 #include <vnet/fib/fib_node.h>
 #include <vnet/fib/fib_source.h>
 #include <vppinfra/bihash_16_8.h>
+#include <vppinfra/bihash_8_8.h>
 
 #define L2TVPP_UDP_PORT 1701
 
@@ -117,6 +118,13 @@ typedef struct
    * FCS-protected, the software header checksum costs ~55 clocks/packet */
   u8 inner_ip4_no_checksum;
   fib_source_t fib_src;		/* subscriber routes; see L2TVPP_FIB_SOURCE_PRIORITY */
+  /* encap fast path: subscriber dst IPv4 -> the session's midchain adj_index,
+   * populated by l2tvpp_route_add_del. l2tvpp-encap-fastpath (a device-input
+   * feature on the uplink) uses it to jump plain uplink->subscriber packets
+   * straight to ip4-midchain, skipping ethernet-input/ip4-input/ip4-lookup. */
+  clib_bihash_8_8_t encap_adj_by_ip4;
+  u32 encap_adj_count;
+  u8 encap_adj_init;
   u16 msg_id_base;
   vlib_main_t *vlib_main;
   vnet_main_t *vnet_main;
