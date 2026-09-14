@@ -74,8 +74,11 @@
 typedef struct
 {
   u16 *workers;			/* thread indices, vec; empty = stay local */
+  u32 rr;			/* round-robin cursor for spray mode */
   u8 enabled;
   u8 fastpath;
+  u8 spray;			/* fan one flow across workers, ignore hash
+				 * (reorders within a flow) */
 } l2tvpp_flow_handoff_if_t;
 
 typedef struct
@@ -378,10 +381,14 @@ VLIB_NODE_FN (l2tvpp_flow_handoff_node) (vlib_main_t * vm,
       sw_if_index = vnet_buffer (b[i])->sw_if_index[VLIB_RX];
       ifd = vec_elt_at_index (fm->if_data, sw_if_index);
       nw = vec_len (ifd->workers);
-      kind = l2tvpp_flow_classify (lm, b[i], ifd->fastpath, nw > 1, &hash,
-				   &l2tp_offset);
+      /* spray needs no hash (round-robin), so classify cheaply; otherwise
+       * compute the flow hash only when there is more than one target */
+      kind = l2tvpp_flow_classify (lm, b[i], ifd->fastpath,
+				   !ifd->spray && nw > 1, &hash, &l2tp_offset);
       if (kind == L2TVPP_FLOW_KIND_LOCAL || nw == 0)
 	thread = this_thread;
+      else if (ifd->spray)
+	thread = ifd->workers[ifd->rr++ % nw];	/* benign race on rr */
       else if (nw == 1)
 	thread = ifd->workers[0];
       else
@@ -474,7 +481,7 @@ VNET_FEATURE_INIT (l2tvpp_flow_handoff_feature, static) = {
 int
 l2tvpp_flow_handoff_enable_disable (vlib_main_t * vm, u32 sw_if_index,
 				    uword * workers_bitmap, u8 fastpath,
-				    u8 enable)
+				    u8 spray, u8 enable)
 {
   l2tvpp_flow_handoff_main_t *fm = &l2tvpp_flow_handoff_main;
   vnet_main_t *vnm = vnet_get_main ();
@@ -511,6 +518,8 @@ l2tvpp_flow_handoff_enable_disable (vlib_main_t * vm, u32 sw_if_index,
 	vec_add1 (ifd->workers, (u16) (1 + i));	/* workers are threads 1..n */
     }
   ifd->fastpath = enable ? fastpath : 0;
+  ifd->spray = enable ? spray : 0;
+  ifd->rr = 0;
   if (ifd->enabled != enable)
     vnet_feature_enable_disable ("device-input", "l2tvpp-flow-handoff",
 				 sw_if_index, enable, 0, 0);
@@ -532,7 +541,7 @@ l2tvpp_flow_handoff_cli (vlib_main_t * vm, unformat_input_t * input,
   vnet_main_t *vnm = vnet_get_main ();
   u32 sw_if_index = ~0;
   uword *bitmap = 0;
-  u8 enable = 1, fastpath = 0;
+  u8 enable = 1, fastpath = 0, spray = 0;
   int rv;
 
   if (!unformat_user (input, unformat_line_input, line))
@@ -545,6 +554,8 @@ l2tvpp_flow_handoff_cli (vlib_main_t * vm, unformat_input_t * input,
 	;
       else if (unformat (line, "fastpath"))
 	fastpath = 1;
+      else if (unformat (line, "spray"))
+	spray = 1;
       else if (unformat (line, "%U", unformat_vnet_sw_interface, vnm,
 			 &sw_if_index))
 	;
@@ -560,9 +571,15 @@ l2tvpp_flow_handoff_cli (vlib_main_t * vm, unformat_input_t * input,
     return clib_error_return (0, "interface required");
   if (enable && bitmap == 0 && !fastpath)
     return clib_error_return (0, "workers <list> and/or fastpath required");
+  if (spray && clib_bitmap_count_set_bits (bitmap) < 2)
+    {
+      clib_bitmap_free (bitmap);
+      return clib_error_return (0, "spray needs workers <list> with >= 2 "
+				"workers");
+    }
 
   rv = l2tvpp_flow_handoff_enable_disable (vm, sw_if_index, bitmap, fastpath,
-					   enable);
+					   spray, enable);
   clib_bitmap_free (bitmap);
   switch (rv)
     {
@@ -582,7 +599,7 @@ l2tvpp_flow_handoff_cli (vlib_main_t * vm, unformat_input_t * input,
 VLIB_CLI_COMMAND (l2tvpp_flow_handoff_command, static) = {
   .path = "l2tvpp flow-handoff",
   .short_help = "l2tvpp flow-handoff <interface> [workers <list>] [fastpath]"
-		" | l2tvpp flow-handoff <interface> disable",
+		" [spray] | l2tvpp flow-handoff <interface> disable",
   .function = l2tvpp_flow_handoff_cli,
 };
 
@@ -643,9 +660,11 @@ l2tvpp_show_flow_handoff_cli (vlib_main_t * vm, unformat_input_t * input,
       vec_foreach (w, ifd->workers) ts = format (ts, "%s%d", ts ? "," : "", *w);
       if (ts)
 	vec_add1 (ts, 0);
-      vlib_cli_output (vm, "%U -> threads %s%s",
+      vlib_cli_output (vm, "%U -> threads %s%s%s",
 		       format_vnet_sw_if_index_name, vnm, sw_if_index,
-		       ts ? (char *) ts : "local", ifd->fastpath ? " fastpath" : "");
+		       ts ? (char *) ts : "local",
+		       ifd->fastpath ? " fastpath" : "",
+		       ifd->spray ? " spray(reorders)" : "");
       vec_free (ts);
     }
   }

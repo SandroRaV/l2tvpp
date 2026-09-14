@@ -128,6 +128,29 @@ interface: `l2tvpp flow-handoff eth1 workers 2-4` (worker numbers as in
 `set interface handoff`, thread = worker + 1); it switches the session
 handoff off so no packet is handed off twice. `show l2tvpp flow-handoff`.
 
+**Spray and fastpath (added 2026-09-14, EPYC/Viavi single-flow bring-up).**
+Two options extend flow-handoff for a load that is a *single* flow (one
+tunnel, one session, one inner 5-tuple), which no in-order hash can spread:
+- `fastpath`: L2TPv2 data whose outer header passes every check
+  ip4-input/ip4-lookup/ip4-receive/udp-local would do (v4, no options, not
+  fragmented, valid header checksum, length, dst = a local tunnel endpoint,
+  udp/1701, v2, T=0) is delivered straight to `l2tvpp-input` at the L2TP
+  header, locally or on the chosen worker; l2/l3/l4 header offsets are set
+  so a later punt still rewinds correctly. Skips ~5 nodes.
+- `spray`: pick the target worker round-robin per packet instead of by
+  hash, so one flow fans across the worker set. **Reorders within the
+  flow** - only for a tester that tolerates it, never a production LNS.
+  `l2tvpp inner-checksum off` sends the decapsulated IPv4 to
+  `ip4-input-no-checksum` (the outer hop is FCS-protected).
+
+Measured ceiling on the EPYC 7F32 (3.7 GHz, ConnectX-4 Lx, VPP 25.10): one
+worker does ~6.3 Mpps of a single flow (decap or encap) with the fast path;
+`no-multi-seg` (vectorized mlx5 rx) is a prerequisite. To go past one core
+for one flow, spray decap and encap onto disjoint worker sets, each with a
+dedicated rx/classify worker. A single rx queue caps the receivable rate at
+~one core of dpdk-input + classify (~320 clocks/pkt), so the rx/classify
+worker, not decap, is the wall above ~11 Mpps per direction.
+
 ### 3e. API and CLI
 
 `l2tvpp.api`:
