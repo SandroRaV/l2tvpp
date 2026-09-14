@@ -21,6 +21,7 @@
 typedef enum
 {
   L2TVPP_INPUT_NEXT_IP4_INPUT,
+  L2TVPP_INPUT_NEXT_IP4_INPUT_NCS,
   L2TVPP_INPUT_NEXT_IP6_INPUT,
   L2TVPP_INPUT_NEXT_PUNT,
   L2TVPP_INPUT_NEXT_DROP,
@@ -230,7 +231,8 @@ VLIB_NODE_FN (l2tvpp_input_node) (vlib_main_t * vm,
 	}
 
       if (ppp_proto == PPP_PROTO_IP4)
-	next0 = L2TVPP_INPUT_NEXT_IP4_INPUT;
+	next0 = lm->inner_ip4_no_checksum ? L2TVPP_INPUT_NEXT_IP4_INPUT_NCS
+	  : L2TVPP_INPUT_NEXT_IP4_INPUT;
       else if (ppp_proto == PPP_PROTO_IP6)
 	next0 = L2TVPP_INPUT_NEXT_IP6_INPUT;
       else
@@ -301,6 +303,7 @@ VLIB_REGISTER_NODE (l2tvpp_input_node) = {
   .n_next_nodes = L2TVPP_INPUT_N_NEXT,
   .next_nodes = {
     [L2TVPP_INPUT_NEXT_IP4_INPUT] = "ip4-input",
+    [L2TVPP_INPUT_NEXT_IP4_INPUT_NCS] = "ip4-input-no-checksum",
     [L2TVPP_INPUT_NEXT_IP6_INPUT] = "ip6-input",
     [L2TVPP_INPUT_NEXT_PUNT] = "ip4-punt",
     [L2TVPP_INPUT_NEXT_DROP] = "error-drop",

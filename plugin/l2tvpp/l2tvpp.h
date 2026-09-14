@@ -108,6 +108,14 @@ typedef struct
   u32 *session_index_by_sw_if_index;
   u8 handoff_enabled;
   u32 handoff_frame_queue_index;
+  /* distinct local IPv4 tunnel endpoints, for the flow-handoff fast path
+   * (l2tvpp-flow-handoff jumps udp/1701 to one of these straight to
+   * l2tvpp-input); grows on tunnel add, never shrinks */
+  u32 *local_ip4s;
+  /* inner IPv4 after decap goes to ip4-input-no-checksum instead of
+   * ip4-input (`l2tvpp inner-checksum off`): the outer hop-by-hop path is
+   * FCS-protected, the software header checksum costs ~55 clocks/packet */
+  u8 inner_ip4_no_checksum;
   fib_source_t fib_src;		/* subscriber routes; see L2TVPP_FIB_SOURCE_PRIORITY */
   u16 msg_id_base;
   vlib_main_t *vlib_main;

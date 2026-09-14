@@ -258,6 +258,12 @@ l2tvpp_tunnel_add_del (l2tvpp_main_t * lm, ip46_address_t * local_ip,
 	return VNET_API_ERROR_TUNNEL_EXIST;
       pool_get_zero (lm->tunnels, t);
       t->local_ip = *local_ip;
+      {
+	u32 *a, ip4 = local_ip->ip4.as_u32, seen = 0;
+	vec_foreach (a, lm->local_ip4s) seen |= (*a == ip4);
+	if (!seen)
+	  vec_add1 (lm->local_ip4s, ip4);
+      }
       t->peer_ip = *peer_ip;
       t->local_port = local_port;
       t->peer_port = peer_port;
