@@ -107,6 +107,9 @@ l2tvpp_build_rewrite_i (l2tvpp_session_t * sess, vnet_link_t link_type)
   ip->checksum = 0;		/* fixup */
   ip->src_address.as_u32 = t->local_ip.ip4.as_u32;
   ip->dst_address.as_u32 = t->peer_ip.ip4.as_u32;
+  /* header is complete except length (0 here); cache its checksum so the
+   * per-packet fixup only folds in the length delta */
+  sess->encap_ip_csum0 = ip4_header_checksum (ip);
 
   udp = (udp_header_t *) (ip + 1);
   udp->src_port = clib_host_to_net_u16 (t->local_port);
@@ -141,15 +144,22 @@ static void
 l2tvpp_fixup (vlib_main_t * vm, const ip_adjacency_t * adj,
 	      vlib_buffer_t * b, const void *data)
 {
+  const l2tvpp_session_t *sess = data;
   ip4_header_t *ip = vlib_buffer_get_current (b);
   udp_header_t *udp = (udp_header_t *) (ip + 1);
   u16 len = vlib_buffer_length_in_chain (vm, b);
+  u16 iplen = clib_host_to_net_u16 (len);
+  ip_csum_t sum;
 
   /* the outer IP is ours, not the subscriber's: don't let ip4-rewrite
    * TTL-decrement it */
   b->flags |= VNET_BUFFER_F_LOCALLY_ORIGINATED;
-  ip->length = clib_host_to_net_u16 (len);
-  ip->checksum = ip4_header_checksum (ip);
+  ip->length = iplen;
+  /* incremental: only the length field changed (0 -> iplen) on a header
+   * whose length=0 checksum is cached; avoids the full 20-byte recompute */
+  sum = sess->encap_ip_csum0;
+  sum = ip_csum_update (sum, 0, iplen, ip4_header_t, length);
+  ip->checksum = ip_csum_fold (sum);
   udp->length = clib_host_to_net_u16 (len - sizeof (*ip));
 }
 

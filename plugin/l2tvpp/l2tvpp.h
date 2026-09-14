@@ -71,6 +71,10 @@ typedef struct
   u8 pfc;
   u32 sw_if_index;		/* the l2tvpp session interface */
   u32 hw_if_index;
+  /* checksum of the constant outer IPv4 encap header with length=0, so the
+   * fixup adjusts only for the per-packet length instead of recomputing the
+   * whole 20-byte header checksum (l2tvpp_build_rewrite_i / l2tvpp_fixup) */
+  u16 encap_ip_csum0;
 } l2tvpp_session_t;
 
 /* L2TPv2 data header as we emit it: no L, no S, no O */
