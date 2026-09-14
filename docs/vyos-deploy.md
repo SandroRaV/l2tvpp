@@ -73,6 +73,30 @@ vppctl show plugins | grep l2tvpp        # l2tvpp_plugin.so must be listed
 Lost on the next `add system image` upgrade - fine for iterating. For a
 persistent install use path 2.
 
+**Even quicker: swap only the `.so`.** After an incremental
+`make build-release` in the same VyOS build tree, copy
+`build-root/install-vpp-native/vpp/lib/x86_64-linux-gnu/vpp_plugins/l2tvpp_plugin.so`
+over `/usr/lib/x86_64-linux-gnu/vpp_plugins/l2tvpp_plugin.so` on the box
+(keep a copy of the old one). Then let **VyOS** restart VPP, not systemd: a
+bare `sudo systemctl restart vpp` brings VPP up with no linux-cp pairs, no
+MTU and no addresses, and every later `vpp` commit fails with "There is no
+Ethernet device: eth1" until `lcp create eth1 host-if eth1` is done by hand
+(seen 2026-09-14). Any `vpp settings` commit restarts VPP and re-applies
+the interfaces, e.g.
+
+```
+configure
+set vpp settings poll-sleep-usec 1
+commit
+delete vpp settings poll-sleep-usec
+commit
+exit
+sudo systemctl restart l2tvppd
+```
+
+or simply `reboot`. The sync daemon must be restarted after any VPP
+restart (its API socket is gone); the LAC has to re-establish the tunnel.
+
 ## 2. Persistent path: build a VyOS image with l2tvpp baked in
 
 ```

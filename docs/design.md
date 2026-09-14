@@ -110,6 +110,24 @@ the uplink RSS. On an E810 the DDP L2TPv2 RSS profile replaces the handoff
 (DPDK 22.03+, `RTE_ETH_RSS_L2TPV2`); keep the handoff optional via a CLI
 flag so both can be benchmarked.
 
+**Flow handoff (`flow_handoff.c`, added 2026-09-14).** The session handoff
+above has two limits that showed up on the EPYC/Viavi rig (one LAC, one
+tunnel, one session, 64-byte frames): with a single session there is
+nothing to spread, and it runs after `ip4-input`/`ip4-lookup`/
+`ip4-receive`/`udp-local`, so the RX worker has already spent ~2/3 of the
+per-packet budget before the buffer moves. `l2tvpp-flow-handoff` is a
+`device-input` feature instead: the driver hands the frame to it before
+`ethernet-input`, it parses outer IP/UDP/L2TP/PPP to the *inner* IP header
+and hashes the inner 5-tuple (crc32c of src, dst, proto, ports; outer
+5-tuple for non-L2TP traffic, so the same node also spreads the plain side
+when RSS cannot), then enqueues the buffer to `ethernet-input` on
+`workers[hash % n]` like VPP's own `worker-handoff`. The RX worker keeps only
+`dpdk-input` plus the hash (~200 clocks), the full decap/forward path runs on
+the chosen worker. Ordering is per inner flow, not per session. Enable per
+interface: `l2tvpp flow-handoff eth1 workers 2-4` (worker numbers as in
+`set interface handoff`, thread = worker + 1); it switches the session
+handoff off so no packet is handed off twice. `show l2tvpp flow-handoff`.
+
 ### 3e. API and CLI
 
 `l2tvpp.api`:
