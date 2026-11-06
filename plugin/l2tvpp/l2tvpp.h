@@ -24,7 +24,6 @@
 #include <vnet/adj/adj.h>
 #include <vnet/fib/fib_node.h>
 #include <vnet/fib/fib_source.h>
-#include <vppinfra/bihash_16_8.h>
 #include <vppinfra/bihash_8_8.h>
 
 #define L2TVPP_UDP_PORT 1701
@@ -63,8 +62,7 @@ typedef struct
 typedef struct
 {
   u32 tunnel_index;
-  u16 local_tid;		/* cached from the tunnel: lets l2tvpp-input
-				 * validate the handoff hint with one load */
+  u16 local_tid;		/* cached from the tunnel */
   u16 local_sid;		/* in packets from the LAC */
   u16 peer_sid;			/* in packets to the LAC */
   u8 acfc;
@@ -93,26 +91,32 @@ typedef CLIB_PACKED (struct {
 
 /* decap lookup key: the LNS-assigned (local) tunnel id + session id, which
  * RFC 2661 already makes unique on this LNS, so the outer IP/port is not
- * needed (and reading it post udp-local is fragile). */
-typedef union
+ * needed (and reading it post udp-local is fragile). Packed into one u64
+ * for clib_bihash_8_8: one key word per probe instead of two. */
+static_always_inline u64
+l2tvpp_session_key (u16 local_tid, u16 local_sid)
 {
-  struct
-  {
-    u16 local_tid;
-    u16 local_sid;
-    u16 pad[6];
-  };
-  u64 as_u64[2];
-} l2tvpp_session_key_t;
+  return ((u64) local_tid << 16) | local_sid;
+}
+
+/* Default depth of the handoff frame queues (frames per target worker);
+ * must be a power of two and at least 8 + number of threads. Overridden
+ * by `l2tvpp { handoff-queue-nelts N }` in startup.conf. */
+#define L2TVPP_HANDOFF_QUEUE_NELTS_DEFAULT 64
 
 typedef struct
 {
   l2tvpp_tunnel_t *tunnels;	/* pool */
   l2tvpp_session_t *sessions;	/* pool */
-  clib_bihash_16_8_t session_by_key;
+  clib_bihash_8_8_t session_by_key;
   u32 *session_index_by_sw_if_index;
   u8 handoff_enabled;
   u32 handoff_frame_queue_index;
+  /* frames per target worker in the handoff queues (l2tvpp-input and the
+   * flow-handoff ethernet-input queue); a full queue DROPS (counted as
+   * "congestion drop" on the handoff node), so size it for the expected
+   * burst. Set from startup.conf before the queues are created. */
+  u32 handoff_queue_nelts;
   /* distinct local IPv4 tunnel endpoints, for the flow-handoff fast path
    * (l2tvpp-flow-handoff jumps udp/1701 to one of these straight to
    * l2tvpp-input); grows on tunnel add, never shrinks */
@@ -143,14 +147,66 @@ extern vnet_device_class_t l2tvpp_device_class;
 u8 *format_l2tvpp_tunnel (u8 * s, va_list * args);
 u8 *format_l2tvpp_session (u8 * s, va_list * args);
 int l2tvpp_set_handoff (l2tvpp_main_t * lm, u8 enable);
+u32 l2tvpp_handoff_queue_nelts (l2tvpp_main_t * lm);
 
-static_always_inline void
-l2tvpp_make_key (l2tvpp_session_key_t * k, u16 local_tid, u16 local_sid)
+/* L2TPv2 header parse shared by l2tvpp-input, l2tvpp-handoff and the
+ * flow-handoff classifier, so the three never drift: version, T bit and
+ * the optional Length field, then tid/sid. On L2TVPP_HDR_DATA *flags,
+ * *tid, *sid are set and *off is the offset of the first byte after the
+ * session id (the Ns/Nr and offset fields, if any, follow; the caller
+ * handles those, see l2tvpp-input). The caller guarantees nothing about
+ * len: a short buffer returns L2TVPP_HDR_TOO_SHORT without reading it. */
+typedef enum
 {
-  k->as_u64[0] = 0;
-  k->as_u64[1] = 0;
-  k->local_tid = local_tid;
-  k->local_sid = local_sid;
+  L2TVPP_HDR_DATA = 0,
+  L2TVPP_HDR_TOO_SHORT,
+  L2TVPP_HDR_NOT_V2,
+  L2TVPP_HDR_CONTROL,
+} l2tvpp_hdr_rc_t;
+
+static_always_inline l2tvpp_hdr_rc_t
+l2tvpp_parse_hdr (const u8 * cur, u32 len, u16 * flags, u16 * tid,
+		  u16 * sid, u32 * off)
+{
+  u16 f;
+  u32 o = 2;
+
+  if (PREDICT_FALSE (len < 6))
+    return L2TVPP_HDR_TOO_SHORT;
+  f = clib_net_to_host_u16 (*(u16 *) cur);
+  *flags = f;
+  if (PREDICT_FALSE ((f & L2TVPP_HDR_VER) != 2))
+    return L2TVPP_HDR_NOT_V2;
+  /* T must be tested before S/O: control messages always carry S, so
+   * checking S first would mislabel them as "sequenced" */
+  if (PREDICT_FALSE (f & L2TVPP_HDR_T))
+    return L2TVPP_HDR_CONTROL;
+  if (f & L2TVPP_HDR_L)
+    {
+      /* the L bit pushes tid/sid to bytes 6-7 - re-check the length so
+       * they are not read from past the buffer */
+      if (PREDICT_FALSE (len < 8))
+	return L2TVPP_HDR_TOO_SHORT;
+      o += 2;
+    }
+  *tid = clib_net_to_host_u16 (*(u16 *) (cur + o));
+  *sid = clib_net_to_host_u16 (*(u16 *) (cur + o + 2));
+  *off = o + 4;
+  return L2TVPP_HDR_DATA;
+}
+
+/* Worker for a session under l2tvpp-handoff: a hash of (tid, sid), so the
+ * ingress worker needs no session lookup and the same session always lands
+ * on the same worker (per-session ordering). Mix the high bits down before
+ * the modulo: the low bits of an odd-multiplier hash depend only on the
+ * low bits of the input, and session ids are sequential. Workers are
+ * threads 1 .. n_workers. */
+static_always_inline u16
+l2tvpp_handoff_worker (u16 tid, u16 sid, u32 n_workers)
+{
+  u32 h = (((u32) tid << 16) | sid) * 0x9E3779B1u;
+  h ^= h >> 16;
+  return (u16) (1 + (h % n_workers));
 }
 
 int l2tvpp_tunnel_add_del (l2tvpp_main_t * lm, ip46_address_t * local_ip,

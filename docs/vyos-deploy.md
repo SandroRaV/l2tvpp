@@ -119,6 +119,20 @@ survives upgrades within that image.
 necessary because VyOS uses `plugin default { disable }` plus an allowlist,
 so an un-listed plugin ships but never loads.
 
+The plugin's own `startup.conf` section is optional and goes into the same
+template if you need it (the hook does not add it):
+
+```
+l2tvpp {
+  handoff-queue-nelts 256
+}
+```
+
+That is the depth of the worker handoff queues (frames per target worker,
+default 64). Raise it when `show errors` shows `congestion drop` on
+`l2tvpp-handoff` or `l2tvpp-flow-handoff` under bursts; those drops are
+subscriber packets.
+
 Upstreaming later: the clean way to get l2tvpp into stock VyOS is a patch to
 `vyos-vpp-patches` (the same mechanism VyOS uses for its own VPP changes) or
 an out-of-tree plugin package; `build/package.toml` shows the one-line

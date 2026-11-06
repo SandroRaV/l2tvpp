@@ -88,12 +88,20 @@ VLIB_NODE_FN (l2tvpp_input_node) (vlib_main_t * vm,
 				  vlib_frame_t * frame)
 {
   l2tvpp_main_t *lm = &l2tvpp_main;
-  vnet_interface_main_t *im = &lm->vnet_main->interface_main;
+  vlib_combined_counter_main_t *rx_counters =
+    lm->vnet_main->interface_main.combined_sw_if_counters +
+    VNET_INTERFACE_COUNTER_RX;
   u32 thread_index = vm->thread_index;
   u32 n_left = frame->n_vectors, *from;
   vlib_buffer_t *bufs[VLIB_FRAME_SIZE], **b = bufs;
   u16 nexts[VLIB_FRAME_SIZE], *next = nexts;
   u32 counts[L2TVPP_INPUT_N_ERROR] = { 0 };
+  /* per-interface RX counters are batched: consecutive packets of the same
+   * session (the common case - one LAC's sessions share a worker, a bench
+   * is one session) add up locally and hit the counter once per run */
+  u32 stats_sw_if_index = ~0, stats_n_packets = 0, stats_n_bytes = 0;
+  const u16 next_ip4 = lm->inner_ip4_no_checksum
+    ? L2TVPP_INPUT_NEXT_IP4_INPUT_NCS : L2TVPP_INPUT_NEXT_IP4_INPUT;
 
   from = vlib_frame_vector_args (frame);
   vlib_get_buffers (vm, from, bufs, n_left);
@@ -101,8 +109,9 @@ VLIB_NODE_FN (l2tvpp_input_node) (vlib_main_t * vm,
   while (n_left > 0)
     {
       vlib_buffer_t *b0 = b[0];
-      u8 *cur;
-      u16 flags, tid, sid, ppp_proto = 0;
+      u8 *start, *cur;
+      u16 flags, tid = 0, sid = 0, ppp_proto = 0;
+      u32 off;
 
       if (PREDICT_TRUE (n_left > 4))
 	{
@@ -112,46 +121,29 @@ VLIB_NODE_FN (l2tvpp_input_node) (vlib_main_t * vm,
       u32 session_index = ~0, error = L2TVPP_INPUT_ERROR_DECAP;
       u32 next0;
 
-      /* udp-local leaves current_data at the L2TP header */
-      cur = vlib_buffer_get_current (b0);
+      /* udp-local (or the flow-handoff fast path) leaves current_data at
+       * the L2TP header */
+      start = vlib_buffer_get_current (b0);
 
-      if (PREDICT_FALSE (b0->current_length < 6))
+      switch (l2tvpp_parse_hdr (start, b0->current_length, &flags, &tid,
+				&sid, &off))
 	{
+	case L2TVPP_HDR_DATA:
+	  break;
+	case L2TVPP_HDR_NOT_V2:
+	  error = L2TVPP_INPUT_ERROR_PUNT_UNSUPPORTED;
+	  goto punt;
+	case L2TVPP_HDR_CONTROL:
+	  error = L2TVPP_INPUT_ERROR_PUNT_CONTROL;
+	  goto punt;
+	case L2TVPP_HDR_TOO_SHORT:
+	default:
 	  error = L2TVPP_INPUT_ERROR_TOO_SHORT;
 	  next0 = L2TVPP_INPUT_NEXT_DROP;
 	  goto trace;
 	}
+      cur = start + off;
 
-      flags = clib_net_to_host_u16 (*(u16 *) cur);
-
-      if (PREDICT_FALSE ((flags & L2TVPP_HDR_VER) != 2))
-	{
-	  error = L2TVPP_INPUT_ERROR_PUNT_UNSUPPORTED;
-	  goto punt;
-	}
-      /* T must be tested before S/O: control messages always carry S, so
-       * checking S first would mislabel them as "sequenced" */
-      if (PREDICT_FALSE (flags & L2TVPP_HDR_T))
-	{
-	  error = L2TVPP_INPUT_ERROR_PUNT_CONTROL;
-	  goto punt;
-	}
-      cur += 2;
-      if (flags & L2TVPP_HDR_L)
-	{
-	  /* the L bit pushes tid/sid to bytes 6-7 - re-check the length
-	   * so they are not read from past the buffer */
-	  if (PREDICT_FALSE (b0->current_length < 8))
-	    {
-	      error = L2TVPP_INPUT_ERROR_TOO_SHORT;
-	      next0 = L2TVPP_INPUT_NEXT_DROP;
-	      goto trace;
-	    }
-	  cur += 2;
-	}
-      tid = clib_net_to_host_u16 (*(u16 *) cur);
-      sid = clib_net_to_host_u16 (*(u16 *) (cur + 2));
-      cur += 4;
       /* Cisco LACs (ASR1001-X, Viavi bench 2026-08-25/27) send data with
        * sequence numbers and/or the offset bit (typically offset size 0);
        * RFC 2661 lets the receiver ignore sequence numbers and the offset
@@ -166,15 +158,23 @@ VLIB_NODE_FN (l2tvpp_input_node) (vlib_main_t * vm,
 	}
       if (PREDICT_FALSE (flags & L2TVPP_HDR_O))
 	{
+	  /* the offset size field itself must be inside the buffer */
+	  if (PREDICT_FALSE (cur + 2 > start + b0->current_length))
+	    {
+	      error = L2TVPP_INPUT_ERROR_TOO_SHORT;
+	      next0 = L2TVPP_INPUT_NEXT_DROP;
+	      goto trace;
+	    }
 	  cur += 2 + clib_net_to_host_u16 (*(u16 *) cur);
 	  error = L2TVPP_INPUT_ERROR_DECAP_OFF;
 	}
       /* S/O advances are attacker-controlled (offset size field): make
        * sure the PPP header we are about to read is still inside the
-       * buffer */
-      if (PREDICT_FALSE (cur + 4 >
-			 (u8 *) vlib_buffer_get_current (b0) +
-			 b0->current_length))
+       * buffer. The L2TP and PPP headers always sit in the first buffer
+       * of a chain, so current_length is the right bound even for
+       * chained (jumbo) frames; the payload may continue in later
+       * buffers and is forwarded as a chain. */
+      if (PREDICT_FALSE (cur + 4 > start + b0->current_length))
 	{
 	  error = L2TVPP_INPUT_ERROR_TOO_SHORT;
 	  next0 = L2TVPP_INPUT_NEXT_DROP;
@@ -182,37 +182,16 @@ VLIB_NODE_FN (l2tvpp_input_node) (vlib_main_t * vm,
 	}
 
       {
-	l2tvpp_session_key_t key;
-	clib_bihash_kv_16_8_t kv;
+	clib_bihash_kv_8_8_t kv;
 
-	/* with handoff on, every frame came through l2tvpp-handoff, which
-	 * already did this lookup and left the result in the buffer; a
-	 * pool slot can be reused by a delete between the two nodes, so
-	 * the hint only counts if the entry still matches the header key
-	 * ((tid, sid) is unique, so a match is authoritative) */
-	if (lm->handoff_enabled)
+	kv.key = l2tvpp_session_key (tid, sid);
+	if (PREDICT_FALSE (clib_bihash_search_inline_8_8
+			   (&lm->session_by_key, &kv)))
 	  {
-	    u32 hint = vnet_buffer (b0)->l2t.session_index;
-	    if (hint != ~0 && !pool_is_free_index (lm->sessions, hint))
-	      {
-		l2tvpp_session_t *s = pool_elt_at_index (lm->sessions, hint);
-		if (s->local_tid == tid && s->local_sid == sid)
-		  session_index = hint;
-	      }
+	    error = L2TVPP_INPUT_ERROR_PUNT_NO_SESSION;
+	    goto punt;
 	  }
-	if (session_index == ~0)
-	  {
-	    l2tvpp_make_key (&key, tid, sid);
-	    kv.key[0] = key.as_u64[0];
-	    kv.key[1] = key.as_u64[1];
-	    if (PREDICT_FALSE (clib_bihash_search_inline_16_8
-			       (&lm->session_by_key, &kv)))
-	      {
-		error = L2TVPP_INPUT_ERROR_PUNT_NO_SESSION;
-		goto punt;
-	      }
-	    session_index = kv.value;
-	  }
+	session_index = kv.value;
       }
 
       /* PPP: optional FF 03, then 1- or 2-byte protocol (PFC if the
@@ -231,8 +210,7 @@ VLIB_NODE_FN (l2tvpp_input_node) (vlib_main_t * vm,
 	}
 
       if (ppp_proto == PPP_PROTO_IP4)
-	next0 = lm->inner_ip4_no_checksum ? L2TVPP_INPUT_NEXT_IP4_INPUT_NCS
-	  : L2TVPP_INPUT_NEXT_IP4_INPUT;
+	next0 = next_ip4;
       else if (ppp_proto == PPP_PROTO_IP6)
 	next0 = L2TVPP_INPUT_NEXT_IP6_INPUT;
       else
@@ -244,15 +222,28 @@ VLIB_NODE_FN (l2tvpp_input_node) (vlib_main_t * vm,
       {
 	l2tvpp_session_t *sess =
 	  pool_elt_at_index (lm->sessions, session_index);
-	u32 adv = cur - (u8 *) vlib_buffer_get_current (b0);
+	u32 len0;
 
-	vlib_buffer_advance (b0, adv);
+	vlib_buffer_advance (b0, cur - start);
 	vnet_buffer (b0)->sw_if_index[VLIB_RX] = sess->sw_if_index;
 	vnet_buffer (b0)->sw_if_index[VLIB_TX] = ~0;	/* default FIB */
-	vlib_increment_combined_counter (im->combined_sw_if_counters +
-					 VNET_INTERFACE_COUNTER_RX,
-					 thread_index, sess->sw_if_index, 1,
-					 vlib_buffer_length_in_chain (vm, b0));
+	/* inline: current_length unless the buffer is chained */
+	len0 = vlib_buffer_length_in_chain (vm, b0);
+	if (PREDICT_TRUE (sess->sw_if_index == stats_sw_if_index))
+	  {
+	    stats_n_packets += 1;
+	    stats_n_bytes += len0;
+	  }
+	else
+	  {
+	    if (stats_n_packets)
+	      vlib_increment_combined_counter (rx_counters, thread_index,
+					       stats_sw_if_index,
+					       stats_n_packets, stats_n_bytes);
+	    stats_sw_if_index = sess->sw_if_index;
+	    stats_n_packets = 1;
+	    stats_n_bytes = len0;
+	  }
       }
       goto trace;
 
@@ -284,6 +275,11 @@ VLIB_NODE_FN (l2tvpp_input_node) (vlib_main_t * vm,
       next += 1;
       n_left -= 1;
     }
+
+  if (stats_n_packets)
+    vlib_increment_combined_counter (rx_counters, thread_index,
+				     stats_sw_if_index, stats_n_packets,
+				     stats_n_bytes);
 
   vlib_buffer_enqueue_to_next (vm, node, from, nexts, frame->n_vectors);
 

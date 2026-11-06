@@ -102,11 +102,21 @@ a memcpy of the rewrite and two length/checksum fixups.
 
 A NIC whose RSS hashes only the outer UDP 4-tuple sees one LAC as a single
 flow, so one LAC = one worker on RX.
-Add a handoff stage like `nat44-ed` does: `l2tvpp-input` on the RX worker
-parses just far enough to get the session index and enqueues the buffer to
-worker `session_index % n_workers` via `vlib_buffer_enqueue_to_thread`;
-that worker does decap and forwarding. Encap direction is already spread by
-the uplink RSS. On an E810 the DDP L2TPv2 RSS profile replaces the handoff
+Add a handoff stage like `nat44-ed` does: `l2tvpp-handoff` on the RX worker
+parses just far enough to read tid/sid and enqueues the buffer to worker
+`1 + hash(tid, sid) % n_workers` via `vlib_buffer_enqueue_to_thread`; that
+worker does the session lookup, decap and forwarding. The RX worker does no
+bihash probe at all (changed 2026-11-06, it used to look the session up and
+pass the index as a hint): every session of a LAC lands on that one worker,
+so whatever runs there is the single-LAC ceiling, and the lookup is
+parallel on the target workers instead. Encap direction is already spread
+by the uplink RSS.
+
+The handoff frame queues (to `l2tvpp-input` and, for flow-handoff, to
+`ethernet-input`) drop when full, counted as `congestion drop` on the
+handoff node; alarm on that counter. The depth is
+`l2tvpp { handoff-queue-nelts N }` in `startup.conf` (default 64 frames per
+target worker, power of two). On an E810 the DDP L2TPv2 RSS profile replaces the handoff
 (DPDK 22.03+, `RTE_ETH_RSS_L2TPV2`); keep the handoff optional via a CLI
 flag so both can be benchmarked.
 
@@ -236,7 +246,7 @@ kernel `pppN` counters stop. Benchmark single worker, one session.
 events, restart reconciliation, IPv6 and PD routes. Benchmark hundreds of
 sessions, session churn, and verify LCP echo survives.
 
-**M3, scale (1-2 weeks)** [handoff DONE 2026-08-23: `handoff.c` (l2tvpp-handoff node, session%%n_workers, frame-queue to l2tvpp-input), `l2tvpp handoff on|off` CLI + l2tvpp_set_handoff API; tested with 2 workers in TestL2tvppHandoff. multi-worker throughput benchmark pending]: worker handoff, multi-worker
+**M3, scale (1-2 weeks)** [handoff DONE 2026-08-23: `handoff.c` (l2tvpp-handoff node, hash(tid,sid)%%n_workers since 2026-11-06, frame-queue to l2tvpp-input), `l2tvpp handoff on|off` CLI + l2tvpp_set_handoff API; tested with 2 workers in TestL2tvppHandoff. Single-flow multi-worker numbers: `bench-epyc-vs-xeon.md`]: worker handoff, multi-worker
 benchmark on real hardware; compare against the kernel path. Then the
 E810 RSS variant if a card is available.
 

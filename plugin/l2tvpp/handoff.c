@@ -24,17 +24,24 @@
  * main-loop enter, see l2tvpp.c) and stays off below that, where there is
  * nothing to spread over; `l2tvpp handoff on|off` overrides either way.
  * When handoff is enabled, udp/1701 is delivered to this node instead of
- * l2tvpp-input; it parses just far enough to get the session index, picks a
- * worker by session_index % n_workers, and enqueues the buffer to
- * l2tvpp-input on that worker. l2tvpp-input's processing is unchanged and
+ * l2tvpp-input; it parses just far enough to read tid/sid, picks a worker
+ * by a hash of (tid, sid) (l2tvpp_handoff_worker) and enqueues the buffer
+ * to l2tvpp-input on that worker. No session lookup happens here: this node
+ * runs on the one RX worker every session of a LAC lands on, so it must stay
+ * cheap, and the bihash probe moves to l2tvpp-input on the target worker,
+ * where it runs in parallel. l2tvpp-input's processing is unchanged and
  * runs wherever the buffer lands, so the encapsulated decap/forward cost is
- * spread over cores even for a single LAC.
+ * spread over cores even for a single LAC. Unknown sessions are handed off
+ * too and punted by l2tvpp-input on the target worker.
  *
- * Packets we cannot resolve to a session (control, unknown session,
- * truncated, v3) are kept on the current thread; l2tvpp-input punts/drops
- * them there, exactly as without handoff. Data with the S or O bit (the
- * ASR quirks) is handed off like plain data: the session key is read from
- * the same header positions, and ordering is safe session-by-session.
+ * Packets that are not v2 data (control, truncated, v3) are kept on the
+ * current thread; l2tvpp-input punts/drops them there, exactly as without
+ * handoff. Data with the S or O bit (the ASR quirks) is handed off like
+ * plain data: tid/sid sit before the Ns/Nr and offset fields, and ordering
+ * is safe session-by-session because one session always maps to one worker.
+ *
+ * The frame queue to l2tvpp-input drops when full (counted here as
+ * "congestion drop"); its depth is `l2tvpp { handoff-queue-nelts N }`.
  */
 #include <vlib/vlib.h>
 #include <vnet/vnet.h>
@@ -42,7 +49,8 @@
 
 typedef struct
 {
-  u32 session_index;
+  u16 tunnel_id;
+  u16 session_id;
   u16 thread_index;
 } l2tvpp_handoff_trace_t;
 
@@ -52,8 +60,8 @@ format_l2tvpp_handoff_trace (u8 * s, va_list * args)
   CLIB_UNUSED (vlib_main_t * vm) = va_arg (*args, vlib_main_t *);
   CLIB_UNUSED (vlib_node_t * node) = va_arg (*args, vlib_node_t *);
   l2tvpp_handoff_trace_t *t = va_arg (*args, l2tvpp_handoff_trace_t *);
-  return format (s, "l2tvpp-handoff: session %d -> thread %d",
-		 t->session_index, t->thread_index);
+  return format (s, "l2tvpp-handoff: tid %d sid %d -> thread %d",
+		 t->tunnel_id, t->session_id, t->thread_index);
 }
 
 #define foreach_l2tvpp_handoff_error _ (CONGESTION, "congestion drop")
@@ -72,45 +80,6 @@ static char *l2tvpp_handoff_error_strings[] = {
 #undef _
 };
 
-/* Parse just the L2TPv2 header far enough to read tid/sid and look the
- * session up. Returns ~0 for anything that is not a data packet we own. */
-static_always_inline u32
-l2tvpp_peek_session (l2tvpp_main_t * lm, vlib_buffer_t * b)
-{
-  u8 *cur = vlib_buffer_get_current (b);
-  u16 flags, tid, sid;
-  l2tvpp_session_key_t key;
-  clib_bihash_kv_16_8_t kv;
-
-  if (PREDICT_FALSE (b->current_length < 6))
-    return ~0;
-  flags = clib_net_to_host_u16 (*(u16 *) cur);
-  if ((flags & L2TVPP_HDR_VER) != 2)
-    return ~0;
-  if (flags & L2TVPP_HDR_T)
-    return ~0;			/* control: keep local, l2tvpp-input punts it */
-  /* S/O data is spread like plain data: tid/sid sit before the Ns/Nr and
-   * offset fields, and per-session ordering holds because one session
-   * always maps to one worker (l2tvpp-input ignores Ns/Nr anyway) */
-  cur += 2;
-  if (flags & L2TVPP_HDR_L)
-    {
-      /* the L bit pushes tid/sid to bytes 6-7 */
-      if (PREDICT_FALSE (b->current_length < 8))
-	return ~0;
-      cur += 2;
-    }
-  tid = clib_net_to_host_u16 (*(u16 *) cur);
-  sid = clib_net_to_host_u16 (*(u16 *) (cur + 2));
-
-  l2tvpp_make_key (&key, tid, sid);
-  kv.key[0] = key.as_u64[0];
-  kv.key[1] = key.as_u64[1];
-  if (clib_bihash_search_inline_16_8 (&lm->session_by_key, &kv))
-    return ~0;
-  return kv.value;
-}
-
 VLIB_NODE_FN (l2tvpp_handoff_node) (vlib_main_t * vm,
 				    vlib_node_runtime_t * node,
 				    vlib_frame_t * frame)
@@ -127,7 +96,8 @@ VLIB_NODE_FN (l2tvpp_handoff_node) (vlib_main_t * vm,
 
   for (i = 0; i < n; i++)
     {
-      u32 si;
+      u16 flags, tid = 0, sid = 0;
+      u32 off;
 
       if (PREDICT_TRUE (i + 4 < n))
 	{
@@ -135,19 +105,22 @@ VLIB_NODE_FN (l2tvpp_handoff_node) (vlib_main_t * vm,
 	  clib_prefetch_load (vlib_buffer_get_current (b[i + 2]));
 	}
 
-      si = l2tvpp_peek_session (lm, b[i]);
-      /* pass the lookup result to l2tvpp-input, which validates it against
-       * the header before use (a pool slot can be reused by a delete) */
-      vnet_buffer (b[i])->l2t.session_index = si;
-      /* worker threads are 1 .. n_workers; keep unresolved packets local */
-      ti[i] = (si == ~0 || n_workers == 0) ? this_thread
-	: (u16) (1 + (si % n_workers));
+      /* worker threads are 1 .. n_workers; keep non-data packets local */
+      if (PREDICT_TRUE (n_workers > 0
+			&& l2tvpp_parse_hdr (vlib_buffer_get_current (b[i]),
+					     b[i]->current_length, &flags,
+					     &tid, &sid, &off)
+			== L2TVPP_HDR_DATA))
+	ti[i] = l2tvpp_handoff_worker (tid, sid, n_workers);
+      else
+	ti[i] = this_thread;
 
       if (PREDICT_FALSE (b[i]->flags & VLIB_BUFFER_IS_TRACED))
 	{
 	  l2tvpp_handoff_trace_t *t =
 	    vlib_add_trace (vm, node, b[i], sizeof (*t));
-	  t->session_index = si;
+	  t->tunnel_id = tid;
+	  t->session_id = sid;
 	  t->thread_index = ti[i];
 	}
     }

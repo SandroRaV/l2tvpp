@@ -250,7 +250,8 @@ l2tvpp_flow_classify (l2tvpp_main_t * lm, vlib_buffer_t * b, int fastpath,
     ip4_header_t *ip = (ip4_header_t *) p;
     udp_header_t *udp;
     u8 *l2tp, *cur;
-    u16 flags;
+    u16 flags, tid, sid;
+    u32 off;
     int fast;
 
     if (PREDICT_FALSE (p + sizeof (*ip) > end))
@@ -266,9 +267,15 @@ l2tvpp_flow_classify (l2tvpp_main_t * lm, vlib_buffer_t * b, int fastpath,
     l2tp = (u8 *) (udp + 1);
     if (PREDICT_FALSE (l2tp + 6 > end))
       goto outer;
-    flags = clib_net_to_host_u16 (*(u16 *) l2tp);
-    if ((flags & L2TVPP_HDR_VER) != 2 || (flags & L2TVPP_HDR_T))
-      return L2TVPP_FLOW_KIND_LOCAL;	/* control or not v2: keep it local */
+    switch (l2tvpp_parse_hdr (l2tp, end - l2tp, &flags, &tid, &sid, &off))
+      {
+      case L2TVPP_HDR_DATA:
+	break;
+      case L2TVPP_HDR_TOO_SHORT:
+	goto outer;
+      default:
+	return L2TVPP_FLOW_KIND_LOCAL;	/* control or not v2: keep it local */
+      }
 
     /* fastpath: everything ip4-input + ip4-lookup + ip4-receive would have
      * checked before udp-local handed the packet to l2tvpp-input */
@@ -294,11 +301,8 @@ l2tvpp_flow_classify (l2tvpp_main_t * lm, vlib_buffer_t * b, int fastpath,
     if (!want_hash)
       return fast ? L2TVPP_FLOW_KIND_FAST : L2TVPP_FLOW_KIND_INNER;
 
-    /* same walk as l2tvpp-input: flags, [len], tid, sid, [Ns Nr], [off] */
-    cur = l2tp + 2;
-    if (flags & L2TVPP_HDR_L)
-      cur += 2;
-    cur += 4;
+    /* same walk as l2tvpp-input: [Ns Nr], [off] after the session id */
+    cur = l2tp + off;
     if (flags & L2TVPP_HDR_S)
       cur += 4;
     if (flags & L2TVPP_HDR_O)
@@ -484,6 +488,7 @@ l2tvpp_flow_handoff_enable_disable (vlib_main_t * vm, u32 sw_if_index,
 				    u8 spray, u8 enable)
 {
   l2tvpp_flow_handoff_main_t *fm = &l2tvpp_flow_handoff_main;
+  l2tvpp_main_t *lm = &l2tvpp_main;
   vnet_main_t *vnm = vnet_get_main ();
   l2tvpp_flow_handoff_if_t *ifd;
   vnet_sw_interface_t *sw;
@@ -502,7 +507,9 @@ l2tvpp_flow_handoff_enable_disable (vlib_main_t * vm, u32 sw_if_index,
   if (fm->frame_queue_index == ~0)
     {
       vlib_node_t *n = vlib_get_node_by_name (vm, (u8 *) "ethernet-input");
-      fm->frame_queue_index = vlib_frame_queue_main_init (n->index, 0);
+      fm->frame_queue_index =
+	vlib_frame_queue_main_init (n->index,
+				    l2tvpp_handoff_queue_nelts (lm));
     }
 
   vec_validate (fm->if_data, sw_if_index);

@@ -302,20 +302,17 @@ l2tvpp_session_add_del (l2tvpp_main_t * lm, u32 tunnel_index,
   vnet_main_t *vnm = lm->vnet_main;
   l2tvpp_tunnel_t *t;
   l2tvpp_session_t *sess;
-  l2tvpp_session_key_t key;
-  clib_bihash_kv_16_8_t kv;
+  clib_bihash_kv_8_8_t kv;
 
   if (pool_is_free_index (lm->tunnels, tunnel_index))
     return VNET_API_ERROR_NO_SUCH_ENTRY;
   t = pool_elt_at_index (lm->tunnels, tunnel_index);
 
-  l2tvpp_make_key (&key, t->local_tid, local_sid);
-  kv.key[0] = key.as_u64[0];
-  kv.key[1] = key.as_u64[1];
+  kv.key = l2tvpp_session_key (t->local_tid, local_sid);
 
   if (is_add)
     {
-      if (!clib_bihash_search_16_8 (&lm->session_by_key, &kv, &kv))
+      if (!clib_bihash_search_8_8 (&lm->session_by_key, &kv, &kv))
 	return VNET_API_ERROR_ENTRY_ALREADY_EXISTS;
 
       pool_get_zero (lm->sessions, sess);
@@ -352,7 +349,7 @@ l2tvpp_session_add_del (l2tvpp_main_t * lm, u32 tunnel_index,
 	sess - lm->sessions;
 
       kv.value = sess - lm->sessions;
-      clib_bihash_add_del_16_8 (&lm->session_by_key, &kv, 1);
+      clib_bihash_add_del_8_8 (&lm->session_by_key, &kv, 1);
 
       vnet_sw_interface_set_flags (vnm, sess->sw_if_index,
 				   VNET_SW_INTERFACE_FLAG_ADMIN_UP);
@@ -365,14 +362,14 @@ l2tvpp_session_add_del (l2tvpp_main_t * lm, u32 tunnel_index,
       return 0;
     }
 
-  if (clib_bihash_search_16_8 (&lm->session_by_key, &kv, &kv))
+  if (clib_bihash_search_8_8 (&lm->session_by_key, &kv, &kv))
     return VNET_API_ERROR_NO_SUCH_ENTRY;
   sess = pool_elt_at_index (lm->sessions, kv.value);
 
   ip4_sw_interface_enable_disable (sess->sw_if_index, 0);
   ip6_sw_interface_enable_disable (sess->sw_if_index, 0);
   vnet_sw_interface_set_flags (vnm, sess->sw_if_index, 0);
-  clib_bihash_add_del_16_8 (&lm->session_by_key, &kv, 0);
+  clib_bihash_add_del_8_8 (&lm->session_by_key, &kv, 0);
   lm->session_index_by_sw_if_index[sess->sw_if_index] = ~0;
   adj_nbr_walk (sess->sw_if_index, FIB_PROTOCOL_IP4,
 		l2tvpp_adj_remove_delegate, 0);
@@ -511,13 +508,14 @@ l2tvpp_init (vlib_main_t * vm)
 
   lm->vlib_main = vm;
   lm->vnet_main = vnet_get_main ();
-  clib_bihash_init_16_8 (&lm->session_by_key, "l2tvpp sessions",
-			 64 * 1024, 32 << 20);
+  clib_bihash_init_8_8 (&lm->session_by_key, "l2tvpp sessions",
+			64 * 1024, 32 << 20);
 
-  /* frame queue feeding l2tvpp-input, used by the handoff node to move
-   * buffers to the worker chosen for their session */
-  lm->handoff_frame_queue_index =
-    vlib_frame_queue_main_init (l2tvpp_input_node.index, 0);
+  /* the frame queue feeding l2tvpp-input is created at main-loop enter
+   * (l2tvpp_handoff_default): startup.conf is parsed after init functions,
+   * and its depth comes from there */
+  lm->handoff_frame_queue_index = ~0;
+  lm->handoff_queue_nelts = L2TVPP_HANDOFF_QUEUE_NELTS_DEFAULT;
   lm->handoff_enabled = 0;
 
   lm->fib_src = fib_source_allocate ("l2tvpp", L2TVPP_FIB_SOURCE_PRIORITY,
@@ -534,15 +532,79 @@ VLIB_INIT_FUNCTION (l2tvpp_init) =
   .runs_after = VLIB_INITS ("udp_local_init"),
 };
 
-/* Handoff on by default when it can actually spread load: with 0 or 1
- * workers it would only add the session peek plus a frame-queue hop to the
- * same thread. The worker count is fixed by the time the main loop starts
- * and no packets are flowing yet, so the udp/1701 registration can be
- * swapped here without a barrier. CLI/API still override either way. */
+/* startup.conf:
+ *   l2tvpp {
+ *     handoff-queue-nelts 256
+ *   }
+ * Depth (frames per target worker) of the handoff frame queues, both the
+ * l2tvpp-input queue of l2tvpp-handoff / the flow-handoff fast path and
+ * the ethernet-input queue of l2tvpp-flow-handoff. A full queue drops
+ * ("congestion drop" on the handoff node), so size it for the burst the
+ * target workers must absorb. Rounded up to a power of two (vlib requires
+ * it) and to at least 8 + number of threads (vlib asserts it). */
+static clib_error_t *
+l2tvpp_config (vlib_main_t * vm, unformat_input_t * input)
+{
+  l2tvpp_main_t *lm = &l2tvpp_main;
+  u32 n;
+
+  while (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
+    {
+      if (unformat (input, "handoff-queue-nelts %u", &n))
+	{
+	  if (n == 0)
+	    return clib_error_return (0, "handoff-queue-nelts must be > 0");
+	  lm->handoff_queue_nelts = n;
+	}
+      else
+	return clib_error_return (0, "unknown input '%U'",
+				  format_unformat_error, input);
+    }
+  return 0;
+}
+
+VLIB_CONFIG_FUNCTION (l2tvpp_config, "l2tvpp");
+
+/* The configured handoff queue depth, made legal for vlib_frame_queue_alloc
+ * (power of two, >= 8 + threads). Call once threads are configured. */
+u32
+l2tvpp_handoff_queue_nelts (l2tvpp_main_t * lm)
+{
+  vlib_thread_main_t *tm = vlib_get_thread_main ();
+  u32 min_nelts = 8 + 1 /* main */  + tm->n_threads;
+  u32 n = lm->handoff_queue_nelts;
+
+  if (n < min_nelts)
+    n = min_nelts;
+  if (!is_pow2 (n))
+    n = 1 << max_log2 (n);
+  if (n != lm->handoff_queue_nelts)
+    {
+      clib_warning ("l2tvpp handoff-queue-nelts %u adjusted to %u "
+		    "(power of two, >= 8 + threads)",
+		    lm->handoff_queue_nelts, n);
+      lm->handoff_queue_nelts = n;
+    }
+  return n;
+}
+
+/* Create the frame queue feeding l2tvpp-input (used by l2tvpp-handoff and
+ * the flow-handoff fast path to move buffers to the chosen worker), now
+ * that startup.conf has been read and the thread count is final.
+ *
+ * Handoff on by default when it can actually spread load: with 0 or 1
+ * workers it would only add the header peek plus a frame-queue hop to the
+ * same thread. No packets are flowing yet, so the udp/1701 registration
+ * can be swapped here without a barrier. CLI/API still override either
+ * way. */
 static clib_error_t *
 l2tvpp_handoff_default (vlib_main_t * vm)
 {
   l2tvpp_main_t *lm = &l2tvpp_main;
+
+  lm->handoff_frame_queue_index =
+    vlib_frame_queue_main_init (l2tvpp_input_node.index,
+				l2tvpp_handoff_queue_nelts (lm));
 
   if (vlib_num_workers () > 1)
     {
