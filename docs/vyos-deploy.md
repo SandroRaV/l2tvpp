@@ -102,12 +102,26 @@ restart (its API socket is gone); the LAC has to re-establish the tunnel.
 ```
 ./build/build-vpp-debs.sh            # produces the l2tvpp VPP debs
 ./build/build-iso.sh                 # rolls them into a VyOS ISO
-ls build/work/vyos-build/build/*.iso
+ls build/iso/*/
 ```
 
-`build-iso.sh` uploads the finished ISO to a download host when
-`PUBLISH_DEST=user@host:/dir` is set or `build/publish.local` (gitignored) holds that
-line; without either it only prints where the ISO is.
+`build-iso.sh` keeps the finished image in `build/iso/<image>/` together with
+its release notes, written by `build/release-notes.py` from the build tree:
+`<image>-release-notes.md` (and `.html` for the browser: VyOS build, package
+and kernel versions, VPP version, l2tvpp revision and CLI features, hooks,
+l2tvpp commits since the previous image folder, free text from
+`RELEASE_NOTES_FILE`), `<image>-release.json` (the same facts, the next build
+diffs against it) and `<image>.sha256`. A checkout copied without `.git`
+needs `L2TVPP_REV=<commit>`, otherwise the notes say "unknown".
+
+The whole folder is uploaded to a download host when `PUBLISH_DEST=user@host:/dir`
+is set or line 1 of `build/publish.local` (gitignored) holds that value; line 2 (or
+`PUBLISH_URL`) is the public base URL for the install line in the notes. The
+upload also appends one line per image to `vyos-images.md` on the host and
+re-renders `vyos-images.html` from it. Without a destination the script only
+prints where the folder is. The vpp-vlan-fast repo's build (l2tvpp plus a
+second plugin in one image) calls the same `release-notes.py` with
+`--vlanfast`/`--variant`.
 
 Install that ISO the normal way (`add system image <iso>` from a running
 VyOS, or a fresh install). The plugin is part of the image's VPP and

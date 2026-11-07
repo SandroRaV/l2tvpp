@@ -1,5 +1,6 @@
 build/out/
 build/work/
+build/iso/
 *.o
 xdp/l2tp_steer
 __pycache__/
