@@ -20,6 +20,15 @@ mkdir -p "$OUT" "$WORK"
 
 if [ ! -d "$WORK/vyos-build" ]; then
   git clone -b "$BRANCH" --single-branch https://github.com/vyos/vyos-build "$WORK/vyos-build"
+else
+  # keep the tree current: the ISO step installs the kernel version named in
+  # data/defaults.toml, and the VyOS package archive only carries the one the
+  # current branch head names (a stale tree fails with "Unable to locate
+  # package linux-image-<old>-vyos"). The docker image is pulled fresh below
+  # for the same reason. Restore the stock package.toml first, it is replaced
+  # with ours right after.
+  git -C "$WORK/vyos-build" checkout -- scripts/package-build/vpp/package.toml
+  git -C "$WORK/vyos-build" pull --ff-only
 fi
 # Our package.toml replaces the stock one (diff against package.toml.vyos-orig
 # to see the single addition).

@@ -25,8 +25,19 @@ WORK="$REPO/build/work"
 [ -d "$WORK/vyos-build" ] || { echo "run build-vpp-debs.sh first"; exit 1; }
 ls "$REPO"/build/out/*.deb >/dev/null 2>&1 || { echo "no debs in build/out"; exit 1; }
 
+# only this build's debs go into the image (older sets would stay behind)
 mkdir -p "$WORK/vyos-build/packages"
+rm -f "$WORK"/vyos-build/packages/*.deb
 cp "$REPO"/build/out/*.deb "$WORK/vyos-build/packages/"
+
+# our debs must win over the same packages in the VyOS archive: vyos-build
+# pins the archive at priority 999 (archives/vyos-dev.pref.chroot) while
+# live-build serves the local debs from a repository with Release Origin
+# "config/packages.chroot" at the default 500. Without this pin apt installs
+# the archive's VPP (it has shipped VPP since 2026-10) and the image ends up
+# without the l2tvpp plugin.
+install -m 0644 "$REPO"/build/vyos-image/local-packages.pref.chroot \
+  "$WORK/vyos-build/data/live-build-config/archives/l2tvpp-local-packages.pref.chroot"
 
 # bake the l2tvpp VPP-plugin-enable hook into the image build
 install -m 0755 "$REPO"/build/vyos-hooks/*.chroot \

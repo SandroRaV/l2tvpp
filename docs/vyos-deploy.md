@@ -123,6 +123,13 @@ prints where the folder is. The vpp-vlan-fast repo's build (l2tvpp plus a
 second plugin in one image) calls the same `release-notes.py` with
 `--vlanfast`/`--variant`.
 
+The VyOS package archive ships its own VPP packages since October 2026, pinned
+at priority 999 by vyos-build; `build-iso.sh` therefore installs an apt
+preference (`build/vyos-image/local-packages.pref.chroot`, priority 1001 for
+the local `packages.chroot` repository) so the l2tvpp debs win, and
+`build-vpp-debs.sh` pulls the vyos-build tree before each build because the
+archive only carries the kernel the current branch head names.
+
 Install that ISO the normal way (`add system image <iso>` from a running
 VyOS, or a fresh install). The plugin is part of the image's VPP and
 survives upgrades within that image.
