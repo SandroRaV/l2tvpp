@@ -15,8 +15,9 @@ netdev per session (pppN, or l2tpN on VyOS); /proc/net/pppol2tp lists each
 with local/peer tunnel id and session id and the netdev name. Both tunnel
 endpoints come from `ip l2tp show tunnel` (the addr field in
 /proc/net/pppol2tp is NOT trustworthy: on the VyOS accel-ppp LNS it holds
-the local address, not the peer). The subscriber's address(es) come from
-`ip addr show <ifname>`.
+the local address, not the peer). The subscriber's addresses and routed
+prefixes come from one `ip -o addr show` and one `ip -o -4/-6 route show`
+per pass for all interfaces (kernel_routes).
 
 For every kernel session the daemon ensures, in VPP:
   l2tvpp_tunnel_add_del   (one per distinct peer-ip/peer-port/local-tid)
@@ -90,7 +91,7 @@ def parse_pppol2tp(text):
                 "peer_tid": int(m.group("ptid"), 16),
                 "peer_sid": int(m.group("psid"), 16),
                 "ifname": None,
-                "routes": None,     # subscriber prefixes; fetched lazily on add
+                "routes": None,     # subscriber prefixes; filled by reconcile
             }
             sessions.append(cur)
             continue
@@ -100,26 +101,50 @@ def parse_pppol2tp(text):
     return sessions
 
 
-def _ppp_routes(ifname, run=subprocess.run):
-    """Subscriber prefixes reachable over pppN: the peer /32 (IPv4), any
-    peer /128 (IPv6), and delegated prefixes routed at the interface."""
-    routes = []
-    out = run(["ip", "-o", "addr", "show", "dev", ifname],
-              capture_output=True, text=True).stdout
-    for m in re.finditer(r"inet\s+\S+\s+peer\s+([0-9.]+)/32", out):
-        routes.append(m.group(1) + "/32")
-    for m in re.finditer(r"inet6\s+([0-9A-Fa-f:]+)\s+peer\s+([0-9A-Fa-f:]+)/128", out):
-        peer = m.group(2)
-        if not peer.lower().startswith("fe80"):     # skip link-local
-            routes.append(peer + "/128")
+ADDR4_RE = re.compile(
+    r"^\d+:\s+(\S+)\s+inet\s+\S+\s+peer\s+([0-9.]+)/32", re.M)
+ADDR6_RE = re.compile(
+    r"^\d+:\s+(\S+)\s+inet6\s+[0-9A-Fa-f:]+\s+peer\s+([0-9A-Fa-f:]+)/128", re.M)
+ROUTE_DEV_RE = re.compile(r"\sdev\s+(\S+)")
+
+
+def parse_ppp_routes(addr_text, route_text):
+    """Subscriber prefixes per interface, {ifname: [prefix, ...]}: the peer
+    /32 (IPv4), any global peer /128 (IPv6), and prefixes routed at the
+    interface (delegated prefixes, framed routes). addr_text is `ip -o addr
+    show`, route_text the concatenated `ip -o -4 route show` and `ip -o -6
+    route show`, all WITHOUT a dev filter: one dump covers every session.
+    Pure, so it is tested."""
+    routes = {}
+    for m in ADDR4_RE.finditer(addr_text):
+        routes.setdefault(m.group(1), set()).add(m.group(2) + "/32")
+    for m in ADDR6_RE.finditer(addr_text):
+        if not m.group(2).lower().startswith("fe80"):   # skip link-local
+            routes.setdefault(m.group(1), set()).add(m.group(2) + "/128")
     # Delegated prefixes (PD) show up as routes with dev pppN, not addresses.
-    out = run(["ip", "-o", "route", "show", "dev", ifname],
-              capture_output=True, text=True).stdout
-    for line in out.splitlines():
-        pfx = line.split()[0]
+    for line in route_text.splitlines():
+        fields = line.split()
+        m = ROUTE_DEV_RE.search(line)
+        if not fields or not m:
+            continue
+        pfx = fields[0]
         if "/" in pfx and not pfx.startswith(("fe80", "169.254")):
-            routes.append(pfx)
-    return sorted(set(routes))
+            routes.setdefault(m.group(1), set()).add(pfx)
+    return {ifname: sorted(pfxs) for ifname, pfxs in routes.items()}
+
+
+def kernel_routes(run=subprocess.run):
+    """Subscriber prefixes of every interface in three `ip` calls, whatever
+    the session count (a per-interface query costs two process spawns per
+    session, which turns a mass reconnect into minutes of install latency).
+    The IPv6 table has to be asked for explicitly: a plain `ip route show`
+    lists IPv4 only, so delegated prefixes would never be seen."""
+    def out(*args):
+        return run(["ip", "-o"] + list(args),
+                   capture_output=True, text=True).stdout
+    return parse_ppp_routes(
+        out("addr", "show"),
+        out("-4", "route", "show") + out("-6", "route", "show"))
 
 
 TUNNEL_RE = re.compile(r"^Tunnel\s+(?P<tid>\d+),")
@@ -164,9 +189,8 @@ def kernel_tunnels(run=subprocess.run):
 def kernel_sessions(run=subprocess.run):
     """Enumerate kernel L2TP/PPP sessions cheaply: two reads
     (/proc/net/pppol2tp + `ip l2tp show tunnel`) regardless of session count.
-    Per-session subscriber routes are NOT fetched here - reconcile pulls them
-    only for sessions it is about to install, so the steady-state poll stays
-    cheap with hundreds of sessions."""
+    Subscriber routes are NOT fetched here - reconcile pulls them for all
+    interfaces at once (kernel_routes) when a session needs them."""
     try:
         text = open("/proc/net/pppol2tp").read()
     except FileNotFoundError:
@@ -227,6 +251,10 @@ class Syncd:
         # restart does not lose track of prior installs.
         self.state_path = state_path
         self.installed = self._load_state()
+        # check our record against what VPP really holds on the next pass:
+        # set at start (the state file may predate a VPP restart) and after
+        # a failed pass or a reconnect
+        self.verify_state = True
 
     def _load_state(self):
         if not self.state_path:
@@ -266,31 +294,76 @@ class Syncd:
                 "no local IP for tunnel %s: `ip l2tp show tunnel` gave none "
                 "and no --local-ip fallback set" % (tk,))
         local_port = s.get("local_port") or self.local_port
-        r = self.vpp.l2tvpp_tunnel_add_del(
+        r = self._check(self.vpp.l2tvpp_tunnel_add_del(
             is_add=True, local_ip=local_ip, peer_ip=s["peer_ip"],
             local_port=local_port, peer_port=s["peer_port"],
-            local_tid=s["local_tid"], peer_tid=s["peer_tid"])
+            local_tid=s["local_tid"], peer_tid=s["peer_tid"]), "tunnel add")
         cache[tk] = r.tunnel_index
         log.info("tunnel + %s -> %d", tk, r.tunnel_index)
         return r.tunnel_index
 
-    def add_session(self, s, tunnels_cache, run=subprocess.run):
-        # subscriber routes are fetched lazily, only for the session being
-        # installed (unless the caller already supplied them, e.g. a test)
+    @staticmethod
+    def _check(r, what):
+        """vpp_papi returns a failed call as a reply with a negative retval
+        instead of raising; without this a refused session add was recorded
+        as installed with sw_if_index ~0."""
+        rv = getattr(r, "retval", 0)
+        if rv:
+            raise RuntimeError("%s failed: VPP retval %d" % (what, rv))
+        return r
+
+    def vpp_sessions(self):
+        """(tunnel_index, local_sid) -> session details"""
+        return {(d.tunnel_index, d.local_sid): d for d in
+                self.vpp.l2tvpp_session_dump(sw_if_index=0xFFFFFFFF)}
+
+    def drop_stale_records(self, live):
+        """Forget installed records VPP no longer has (VPP restarted while
+        the state file survived): they are re-installed by the same pass.
+        Without this the daemon believed everything was in place and an
+        empty VPP stayed empty."""
+        for key in list(self.installed):
+            rec = self.installed[key]
+            d = live.get((rec["tunnel_index"], rec["local_sid"]))
+            if d is None or d.sw_if_index != rec["sw_if_index"]:
+                del self.installed[key]
+                log.warning("session %s (sw_if_index %d) is not in VPP any "
+                            "more; re-installing", key, rec["sw_if_index"])
+
+    def add_session(self, s, tunnels_cache, run=subprocess.run, live=None):
+        # reconcile supplies the routes; this is only for a direct caller
         if s.get("routes") is None:
-            s["routes"] = _ppp_routes(s["ifname"], run=run) if s["ifname"] else []
+            s["routes"] = (kernel_routes(run).get(s["ifname"], [])
+                           if s["ifname"] else [])
         tidx = self.ensure_tunnel(s, tunnels_cache)
-        r = self.vpp.l2tvpp_session_add_del(
-            is_add=True, tunnel_index=tidx,
-            local_sid=s["local_sid"], peer_sid=s["peer_sid"],
-            acfc=False, pfc=False)
-        swif = r.sw_if_index
+        d = (live or {}).get((tidx, s["local_sid"]))
+        if d is not None and d.peer_sid != s["peer_sid"]:
+            # same local id, different peer id: not the session we want
+            self._check(self.vpp.l2tvpp_session_add_del(
+                is_add=False, tunnel_index=tidx, local_sid=s["local_sid"],
+                peer_sid=d.peer_sid), "session del")
+            d = None
+        if d is not None:
+            # VPP already has it but our record does not (state file lost):
+            # adopt it instead of failing on "already exists" every pass.
+            # Route adds are idempotent in the plugin.
+            swif = d.sw_if_index
+            log.info("session tid %d sid %d already in VPP, adopting "
+                     "sw_if_index %d", s["local_tid"], s["local_sid"], swif)
+        else:
+            swif = self._check(self.vpp.l2tvpp_session_add_del(
+                is_add=True, tunnel_index=tidx,
+                local_sid=s["local_sid"], peer_sid=s["peer_sid"],
+                acfc=False, pfc=False), "session add").sw_if_index
+        # record before the routes go in, so a failed route add leaves a
+        # session we know about (and whose routes the next pass completes)
+        rec = {"sw_if_index": swif, "tunnel_index": tidx,
+               "local_sid": s["local_sid"], "peer_sid": s["peer_sid"],
+               "tunnel_key": list(tunnel_key(s)), "routes": []}
+        self.installed["%d/%d" % session_key(s)] = rec
         for pfx in s["routes"]:
             self._route(pfx, swif, is_add=1)
-        self.installed["%d/%d" % session_key(s)] = {
-            "sw_if_index": swif, "tunnel_index": tidx,
-            "local_sid": s["local_sid"], "peer_sid": s["peer_sid"],
-            "tunnel_key": list(tunnel_key(s)), "routes": list(s["routes"])}
+            rec["routes"].append(pfx)
         log.info("session + tid %d sid %d -> sw_if_index %d (%d routes)",
                  s["local_tid"], s["local_sid"], swif, len(s["routes"]))
         return swif
@@ -300,12 +373,15 @@ class Syncd:
         kernel's current list (handles a subscriber gaining/losing a PD)."""
         rec = self.installed["%d/%d" % session_key(s)]
         have, want = set(rec["routes"]), set(s["routes"])
-        for pfx in want - have:
+        # sorted: deterministic order; the record follows each call, so a
+        # failure half way leaves it describing what VPP really has
+        for pfx in sorted(want - have):
             self._route(pfx, rec["sw_if_index"], is_add=1)
-        for pfx in have - want:
+            rec["routes"] = sorted(set(rec["routes"]) | {pfx})
+        for pfx in sorted(have - want):
             self._route(pfx, rec["sw_if_index"], is_add=0)
+            rec["routes"] = sorted(set(rec["routes"]) - {pfx})
         if have != want:
-            rec["routes"] = sorted(want)
             log.info("session tid %d sid %d routes %d -> %d",
                      s["local_tid"], s["local_sid"], len(have), len(want))
 
@@ -313,9 +389,10 @@ class Syncd:
         rec = self.installed[key]
         for pfx in rec["routes"]:
             self._route(pfx, rec["sw_if_index"], is_add=0)
-        self.vpp.l2tvpp_session_add_del(
+        self._check(self.vpp.l2tvpp_session_add_del(
             is_add=False, tunnel_index=rec["tunnel_index"],
-            local_sid=rec["local_sid"], peer_sid=rec["peer_sid"])
+            local_sid=rec["local_sid"], peer_sid=rec["peer_sid"]),
+            "session del")
         del self.installed[key]
         log.info("session - %s (sw_if_index %d)", key, rec["sw_if_index"])
 
@@ -337,8 +414,9 @@ class Syncd:
         # linux-cp's lcp-rt mirror of the kernel session route; an
         # ip_route_add_del route (API source) loses to that mirror and
         # downstream traffic keeps punting to the kernel
-        self.vpp.l2tvpp_route_add_del(
-            is_add=bool(is_add), prefix=prefix, sw_if_index=sw_if_index)
+        self._check(self.vpp.l2tvpp_route_add_del(
+            is_add=bool(is_add), prefix=prefix, sw_if_index=sw_if_index),
+            "route %s %s" % ("add" if is_add else "del", prefix))
 
     # -- the reconcile pass ------------------------------------------------
     def reconcile(self, ksessions, sync_existing_routes=True, run=subprocess.run):
@@ -346,30 +424,59 @@ class Syncd:
         of what we installed. Returns (added, removed).
 
         sync_existing_routes re-checks routes of already-installed sessions
-        (to catch a subscriber gaining/losing a delegated prefix). It costs
-        an `ip` call per existing session, so the daemon loop runs it only
-        every few passes; adds/removes are always handled."""
+        (to catch a subscriber gaining/losing a delegated prefix, or an
+        address that was not assigned yet when the session was installed).
+        The routes of all interfaces come from one kernel_routes() call per
+        pass, so this is cheap whatever the session count.
+
+        One session VPP refuses does not stop the pass: it is logged, the
+        others are still handled, and the next pass retries it. Errors of
+        the API transport itself (VPP gone) do abort the pass."""
         want = {"%d/%d" % session_key(s): s for s in ksessions if s["ifname"]}
         tunnels_cache = self.vpp_tunnels()
+        live = None
+        if self.verify_state:
+            live = self.vpp_sessions()
+            self.drop_stale_records(live)
+        self.verify_state = True        # until this pass ends cleanly
+        kroutes = []                    # fetched once, on first need
 
-        added = removed = 0
+        def fill_routes(s):
+            if s.get("routes") is None:
+                if not kroutes:
+                    kroutes.append(kernel_routes(run))
+                s["routes"] = kroutes[0].get(s["ifname"], [])
+
+        added = removed = failed = 0
         for key, s in want.items():
-            if key not in self.installed:
-                self.add_session(s, tunnels_cache, run=run)
-                added += 1
-            elif sync_existing_routes:
-                if s.get("routes") is None:
-                    s["routes"] = _ppp_routes(s["ifname"], run=run)
-                self.sync_routes(s)
+            try:
+                if key not in self.installed:
+                    fill_routes(s)
+                    if live is None:
+                        live = self.vpp_sessions()
+                    self.add_session(s, tunnels_cache, run=run, live=live)
+                    added += 1
+                elif sync_existing_routes:
+                    fill_routes(s)
+                    self.sync_routes(s)
+            except RuntimeError as e:
+                failed += 1
+                log.error("session %s: %s", key, e)
         for key in list(self.installed):
             if key not in want:
-                self.del_session(key)
-                removed += 1
+                try:
+                    self.del_session(key)
+                    removed += 1
+                except RuntimeError as e:
+                    failed += 1
+                    log.error("session %s: %s", key, e)
         if removed:
             self.prune_tunnels()
         self._save_state()
-        log.info("reconcile: %d kernel sessions, +%d -%d in VPP",
-                 len(want), added, removed)
+        self.verify_state = failed > 0
+        log.info("reconcile: %d kernel sessions, +%d -%d in VPP%s",
+                 len(want), added, removed,
+                 ", %d failed" % failed if failed else "")
         return added, removed
 
 
@@ -422,10 +529,6 @@ def run_daemon(local_ip, local_port, interval, state_path):
     log.info("l2tvppd up: reconcile every %ds (SIGHUP to poke), local-ip "
              "auto per tunnel%s", interval,
              "" if local_ip is None else " (fallback %s)" % local_ip)
-    # cheap adds/removes every tick; the costlier per-session route re-check
-    # (delegated-prefix changes) only every ~6 ticks
-    ROUTE_RESYNC_EVERY = 6
-    tick = 0
     try:
         # reconcile UNCONDITIONALLY each iteration - this is the interval
         # safety net; SIGHUP only cuts the sleep short. (Gating the pass on
@@ -435,11 +538,23 @@ def run_daemon(local_ip, local_port, interval, state_path):
         while True:
             wake["now"] = False
             try:
-                sync.reconcile(kernel_sessions(),
-                               sync_existing_routes=(tick % ROUTE_RESYNC_EVERY == 0))
-                tick += 1
+                sync.reconcile(kernel_sessions())
             except Exception:               # never let one bad pass kill the loop
                 log.exception("reconcile failed; will retry")
+                # a pass that dies on the API transport usually means VPP
+                # restarted: this client is then dead for good and VPP is
+                # empty, so get a fresh connection and re-check our record
+                try:
+                    vpp.api.control_ping()
+                except Exception:
+                    log.warning("VPP API connection lost; reconnecting")
+                    try:
+                        vpp.disconnect()
+                    except Exception:
+                        pass
+                    vpp = connect_vpp_retry(interval)
+                    sync.vpp = vpp.api
+                    sync.verify_state = True
             for _ in range(interval):
                 if wake["now"]:
                     break

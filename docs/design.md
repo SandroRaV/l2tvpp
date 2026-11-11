@@ -174,7 +174,16 @@ ethernet-input, ip4-input and ip4-lookup. ip4-midchain still does the TTL
 decrement, checksum, rewrite and fixup, so forwarding is unchanged; only the
 lookup is shortcut. IPv4, unfragmented, no options only; everything else goes
 to ethernet-input. Enable with `l2tvpp encap-fastpath <uplink> [disable]`,
-inspect with `show l2tvpp encap-fastpath`.
+inspect with `show l2tvpp encap-fastpath`: it lists the cached adjacencies
+and the node's hit and miss counters (also in `show errors`). A miss is
+anything left to ethernet-input, so on an uplink that carries only subscriber
+traffic a growing miss count means subscriber /32s are not in the cache.
+
+The cache follows the routes: a repeated add of the same /32 replaces the
+entry (no leaked adjacency lock), and a session delete removes the session's
+routes and cache entries itself, so a control plane that deletes a session
+without removing its routes first cannot leave the fast path pointing at a
+freed session.
 
 ### 3e. API and CLI
 
@@ -211,6 +220,20 @@ Event source, in order of preference (decide in milestone 0):
 For each session up: ensure tunnel in VPP, add session, add routes, record
 the mapping. For each session down: remove in reverse. On daemon start:
 reconcile VPP state against the kernel state so a restart is harmless.
+
+The daemon's record of what it installed is checked against VPP
+(`l2tvpp_session_dump`) on the first pass, after a failed pass and after a
+reconnect: records VPP no longer has are dropped and re-installed (VPP
+restarted, state file survived), and a wanted session VPP already has is
+adopted instead of added again (state file lost). Sessions the daemon did
+not install and the kernel does not have are left alone. A lost API
+connection is re-established in the loop.
+
+Subscriber routes of all sessions come from three `ip` calls per pass
+(`ip -o addr show`, `ip -o -4 route show`, `ip -o -6 route show`), not from
+calls per interface, so every pass also re-checks the routes of installed
+sessions. The IPv6 table is asked for explicitly: a plain `ip route show`
+lists IPv4 only and never shows a delegated prefix.
 
 Framing flags (ACFC/PFC) come from what accel-ppp negotiated; if they are
 not exposed, force them off in accel-ppp's `[ppp]` section for the first
