@@ -418,6 +418,134 @@ class TestL2tvppAddDel(VppTestCase):
                 peer_port=L2TP_PORT, local_tid=LOCAL_TID, peer_tid=PEER_TID)
 
 
+class TestL2tvppEncapFastpath(VppTestCase):
+    """l2tvpp encap fast path: the subscriber adjacency cache follows route
+    and session changes, and the node counts hits and misses"""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.create_pg_interfaces(range(2))
+        for i in cls.pg_interfaces:
+            i.admin_up()
+            i.config_ip4()
+            i.resolve_arp()
+        cls.vapi.ip_neighbor_add_del(
+            cls.pg0.sw_if_index, cls.pg0.remote_mac, cls.pg0.remote_ip4,
+            is_add=1, flags=1)
+        cls.tunnel = cls.vapi.l2tvpp_tunnel_add_del(
+            is_add=True, local_ip=cls.pg0.local_ip4, peer_ip=cls.pg0.remote_ip4,
+            local_port=L2TP_PORT, peer_port=L2TP_PORT,
+            local_tid=LOCAL_TID, peer_tid=PEER_TID).tunnel_index
+
+    def add_session(self, lsid, psid):
+        return self.vapi.l2tvpp_session_add_del(
+            is_add=True, tunnel_index=self.tunnel, local_sid=lsid,
+            peer_sid=psid, acfc=False, pfc=False).sw_if_index
+
+    def del_session(self, lsid, psid):
+        self.vapi.l2tvpp_session_add_del(
+            is_add=False, tunnel_index=self.tunnel, local_sid=lsid,
+            peer_sid=psid)
+
+    def route(self, sub, swif, is_add):
+        self.vapi.l2tvpp_route_add_del(
+            is_add=is_add, prefix=sub + "/32", sw_if_index=swif)
+
+    def fastpath_stats(self):
+        """(cached adjacencies, hits, misses) from the show command"""
+        import re
+        out = self.vapi.cli("show l2tvpp encap-fastpath")
+        cached = int(re.search(r"cached subscriber adjacencies: (\d+)", out).group(1))
+        m = re.search(r"hits: (\d+)\s+misses: (\d+)", out)
+        return cached, int(m.group(1)), int(m.group(2))
+
+    def send_to(self, dst, n, expect_sid=None):
+        p = (Ether(src=self.pg1.remote_mac, dst=self.pg1.local_mac)
+             / IP(src=self.pg1.remote_ip4, dst=dst) / UDP(sport=5678, dport=1234))
+        self.pg_enable_capture(self.pg_interfaces)
+        self.pg1.add_stream([p] * n)
+        self.pg_start()
+        rx = self.pg0.get_capture(n)
+        for r in rx:
+            if expect_sid is None:
+                self.assertNotEqual(r[UDP].dport, L2TP_PORT)
+            else:
+                self.assertEqual(r[L2TP].session_id, expect_sid)
+                self.assertEqual(r[PPP][IP].dst, dst)
+
+    def test_hits_and_misses_are_counted(self):
+        """subscriber traffic takes the fast path, the rest is counted as a miss"""
+        swif = self.add_session(1000, 2000)
+        self.route("10.200.0.5", swif, True)
+        self.vapi.cli("l2tvpp encap-fastpath pg1")
+        try:
+            _, hits0, misses0 = self.fastpath_stats()
+            self.send_to("10.200.0.5", 7, expect_sid=2000)
+            self.send_to(self.pg0.remote_ip4, 3)        # not a subscriber
+            _, hits, misses = self.fastpath_stats()
+            self.assertEqual(hits - hits0, 7)
+            self.assertEqual(misses - misses0, 3)
+        finally:
+            self.vapi.cli("l2tvpp encap-fastpath pg1 disable")
+            self.route("10.200.0.5", swif, False)
+            self.del_session(1000, 2000)
+        self.assertEqual(self.fastpath_stats()[0], 0)
+
+    def test_repeated_route_add_is_idempotent(self):
+        """a daemon that lost its state adds routes again: one cache entry,
+        one FIB path, and a single del removes both"""
+        swif = self.add_session(1000, 2000)
+        try:
+            self.route("10.200.0.5", swif, True)
+            self.route("10.200.0.5", swif, True)
+            self.assertEqual(self.fastpath_stats()[0], 1)
+            self.assertIn("buckets:1", self.vapi.cli("show ip fib 10.200.0.5/32"))
+            self.route("10.200.0.5", swif, False)
+            self.assertEqual(self.fastpath_stats()[0], 0)
+            self.assertNotIn("10.200.0.5/32",
+                             self.vapi.cli("show ip fib 10.200.0.5/32"))
+        finally:
+            self.del_session(1000, 2000)
+
+    def test_route_moves_between_sessions(self):
+        """the same /32 added on a second session replaces the cache entry;
+        a late del from the first session must not remove it"""
+        a = self.add_session(1000, 2000)
+        b = self.add_session(1001, 2001)
+        self.vapi.cli("l2tvpp encap-fastpath pg1")
+        try:
+            self.route("10.200.0.5", a, True)
+            self.route("10.200.0.5", b, True)
+            self.assertEqual(self.fastpath_stats()[0], 1)
+            self.route("10.200.0.5", a, False)
+            self.assertEqual(self.fastpath_stats()[0], 1)
+            self.send_to("10.200.0.5", 5, expect_sid=2001)
+        finally:
+            self.vapi.cli("l2tvpp encap-fastpath pg1 disable")
+            self.del_session(1001, 2001)
+            self.del_session(1000, 2000)
+        self.assertEqual(self.fastpath_stats()[0], 0)
+
+    def test_session_delete_takes_its_routes(self):
+        """deleting a session without removing its routes first leaves no
+        cache entry and no FIB entry pointing at the deleted interface"""
+        swif = self.add_session(1000, 2000)
+        self.route("10.200.0.5", swif, True)
+        self.route("10.200.0.6", swif, True)
+        self.assertEqual(self.fastpath_stats()[0], 2)
+        self.del_session(1000, 2000)
+        self.assertEqual(self.fastpath_stats()[0], 0)
+        for sub in ("10.200.0.5", "10.200.0.6"):
+            self.assertNotIn(sub + "/32",
+                             self.vapi.cli("show ip fib %s/32" % sub))
+        # and the ids are reusable straight away
+        swif = self.add_session(1000, 2000)
+        self.route("10.200.0.5", swif, True)
+        self.send_to("10.200.0.5", 5, expect_sid=2000)
+        self.del_session(1000, 2000)
+
+
 if __name__ == "__main__":
     unittest.main(testRunner=VppTestRunner)
 

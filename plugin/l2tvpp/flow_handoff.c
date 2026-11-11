@@ -252,6 +252,7 @@ l2tvpp_flow_classify (l2tvpp_main_t * lm, vlib_buffer_t * b, int fastpath,
     u8 *l2tp, *cur;
     u16 flags, tid, sid;
     u32 off;
+    u16 ip_len;
     int fast;
 
     if (PREDICT_FALSE (p + sizeof (*ip) > end))
@@ -278,13 +279,16 @@ l2tvpp_flow_classify (l2tvpp_main_t * lm, vlib_buffer_t * b, int fastpath,
       }
 
     /* fastpath: everything ip4-input + ip4-lookup + ip4-receive would have
-     * checked before udp-local handed the packet to l2tvpp-input */
+     * checked before udp-local handed the packet to l2tvpp-input. Cheapest
+     * tests first: udp/1701 that is not addressed to us (transit L2TP)
+     * never pays for the header checksum. */
+    ip_len = clib_net_to_host_u16 (ip->length);
     fast = fastpath && !tagged
       && ip->ip_version_and_header_length == 0x45
-      && clib_net_to_host_u16 (ip->length) <= (end - p)
-      && clib_net_to_host_u16 (ip->length) >= sizeof (*ip) + sizeof (*udp) + 6
-      && ip4_header_checksum_is_valid (ip)
-      && l2tvpp_is_local_ip4 (lm, ip->dst_address.as_u32);
+      && l2tvpp_is_local_ip4 (lm, ip->dst_address.as_u32)
+      && ip_len <= (end - p)
+      && ip_len >= sizeof (*ip) + sizeof (*udp) + 6
+      && ip4_header_checksum_is_valid (ip);
     if (fast)
       {
 	*l2tp_offset = l2tp - start;

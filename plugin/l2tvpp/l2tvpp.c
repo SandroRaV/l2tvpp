@@ -236,6 +236,9 @@ VNET_HW_INTERFACE_CLASS (l2tvpp_hw_class) = {
 /* --------------------------------------------------------------------
  * tunnels and sessions
  */
+static void l2tvpp_encap_adj_flush_session (l2tvpp_main_t * lm,
+					    l2tvpp_session_t * sess);
+
 static l2tvpp_tunnel_t *
 l2tvpp_tunnel_find (l2tvpp_main_t * lm, ip46_address_t * peer_ip,
 		    u16 peer_port, u16 local_tid)
@@ -348,7 +351,8 @@ l2tvpp_session_add_del (l2tvpp_main_t * lm, u32 tunnel_index,
       lm->session_index_by_sw_if_index[sess->sw_if_index] =
 	sess - lm->sessions;
 
-      kv.value = sess - lm->sessions;
+      kv.value = l2tvpp_session_value (sess - lm->sessions,
+				       sess->sw_if_index);
       clib_bihash_add_del_8_8 (&lm->session_by_key, &kv, 1);
 
       vnet_sw_interface_set_flags (vnm, sess->sw_if_index,
@@ -364,8 +368,23 @@ l2tvpp_session_add_del (l2tvpp_main_t * lm, u32 tunnel_index,
 
   if (clib_bihash_search_8_8 (&lm->session_by_key, &kv, &kv))
     return VNET_API_ERROR_NO_SUCH_ENTRY;
-  sess = pool_elt_at_index (lm->sessions, kv.value);
+  sess = pool_elt_at_index (lm->sessions,
+			    l2tvpp_session_value_index (kv.value));
 
+  /* the encap fast path must stop resolving to this session before its
+   * interface and adjacencies go away, whether or not the control plane
+   * removed the subscriber routes first */
+  while (vec_len (sess->routes))
+    {
+      u32 n = vec_len (sess->routes);
+      fib_prefix_t pfx = sess->routes[n - 1];
+
+      l2tvpp_route_add_del (lm, &pfx, sess->sw_if_index, 0);
+      if (vec_len (sess->routes) == n)	/* cannot happen; never spin */
+	vec_set_len (sess->routes, n - 1);
+    }
+  vec_free (sess->routes);
+  l2tvpp_encap_adj_flush_session (lm, sess);
   ip4_sw_interface_enable_disable (sess->sw_if_index, 0);
   ip6_sw_interface_enable_disable (sess->sw_if_index, 0);
   vnet_sw_interface_set_flags (vnm, sess->sw_if_index, 0);
@@ -399,13 +418,50 @@ l2tvpp_encap_adj_init (l2tvpp_main_t * lm)
   lm->encap_adj_init = 1;
 }
 
+/* the session that owns sw_if_index, or 0 */
+static l2tvpp_session_t *
+l2tvpp_session_by_sw_if_index (l2tvpp_main_t * lm, u32 sw_if_index)
+{
+  u32 si;
+
+  if (sw_if_index >= vec_len (lm->session_index_by_sw_if_index))
+    return 0;
+  si = lm->session_index_by_sw_if_index[sw_if_index];
+  if (si == ~0 || pool_is_free_index (lm->sessions, si))
+    return 0;
+  return pool_elt_at_index (lm->sessions, si);
+}
+
+/* drop one cached entry: the hash entry, the owning session's record of it
+ * and the adjacency lock taken when it was cached */
+static void
+l2tvpp_encap_adj_uncache (l2tvpp_main_t * lm, clib_bihash_kv_8_8_t * kv)
+{
+  adj_index_t ai = (adj_index_t) kv->value;
+  l2tvpp_session_t *sess =
+    l2tvpp_session_by_sw_if_index (lm, adj_get_sw_if_index (ai));
+  u32 i;
+
+  clib_bihash_add_del_8_8 (&lm->encap_adj_by_ip4, kv, 0);
+  if (sess)
+    vec_foreach_index (i, sess->encap_ip4s)
+      if (sess->encap_ip4s[i] == (u32) kv->key)
+	{
+	  vec_del1 (sess->encap_ip4s, i);
+	  break;
+	}
+  adj_unlock (ai);
+  if (lm->encap_adj_count)
+    lm->encap_adj_count--;
+}
+
 /* add (is_add) or remove the subscriber -> midchain-adj mapping used by
  * l2tvpp-encap-fastpath; IPv4 /32 only (the fast path is IPv4-only) */
 static void
 l2tvpp_encap_adj_add_del (l2tvpp_main_t * lm, const fib_prefix_t * pfx,
 			  u32 sw_if_index, u8 is_add)
 {
-  clib_bihash_kv_8_8_t kv;
+  clib_bihash_kv_8_8_t kv, old;
   ip46_address_t nh;
 
   if (pfx->fp_proto != FIB_PROTOCOL_IP4 || pfx->fp_len != 32)
@@ -415,7 +471,16 @@ l2tvpp_encap_adj_add_del (l2tvpp_main_t * lm, const fib_prefix_t * pfx,
 
   if (is_add)
     {
+      l2tvpp_session_t *sess = l2tvpp_session_by_sw_if_index (lm, sw_if_index);
       adj_index_t ai;
+
+      if (!sess)
+	return;
+      /* a repeated add (daemon restart, route moved to another session)
+       * replaces the entry: release the old one first, or its adjacency
+       * lock leaks and the count drifts */
+      if (!clib_bihash_search_8_8 (&lm->encap_adj_by_ip4, &kv, &old))
+	l2tvpp_encap_adj_uncache (lm, &old);
       /* same neighbour adjacency ip4-lookup resolves this /32 to: a lock
        * keeps it alive for the cache, released on remove */
       clib_memset (&nh, 0, sizeof (nh));
@@ -424,25 +489,46 @@ l2tvpp_encap_adj_add_del (l2tvpp_main_t * lm, const fib_prefix_t * pfx,
 				sw_if_index);
       kv.value = ai;
       if (!clib_bihash_add_del_8_8 (&lm->encap_adj_by_ip4, &kv, 1))
-	lm->encap_adj_count++;
+	{
+	  vec_add1 (sess->encap_ip4s, (u32) kv.key);
+	  lm->encap_adj_count++;
+	}
+      else
+	adj_unlock (ai);
     }
   else
     {
-      if (!clib_bihash_search_8_8 (&lm->encap_adj_by_ip4, &kv, &kv))
-	{
-	  clib_bihash_add_del_8_8 (&lm->encap_adj_by_ip4, &kv, 0);
-	  adj_unlock ((adj_index_t) kv.value);
-	  if (lm->encap_adj_count)
-	    lm->encap_adj_count--;
-	}
+      /* only the session the route is being removed from may uncache it:
+       * the /32 may have moved to another session in the meantime */
+      if (!clib_bihash_search_8_8 (&lm->encap_adj_by_ip4, &kv, &old)
+	  && adj_get_sw_if_index ((adj_index_t) old.value) == sw_if_index)
+	l2tvpp_encap_adj_uncache (lm, &old);
     }
+}
+
+/* session delete: uncache every /32 still pointing at the session */
+static void
+l2tvpp_encap_adj_flush_session (l2tvpp_main_t * lm, l2tvpp_session_t * sess)
+{
+  clib_bihash_kv_8_8_t kv;
+
+  while (vec_len (sess->encap_ip4s))
+    {
+      /* pop first: the loop ends whatever the hash holds */
+      kv.key = vec_pop (sess->encap_ip4s);
+      if (!clib_bihash_search_8_8 (&lm->encap_adj_by_ip4, &kv, &kv)
+	  && adj_get_sw_if_index ((adj_index_t) kv.value) == sess->sw_if_index)
+	l2tvpp_encap_adj_uncache (lm, &kv);
+    }
+  vec_free (sess->encap_ip4s);
 }
 
 int
 l2tvpp_route_add_del (l2tvpp_main_t * lm, const fib_prefix_t * pfx,
 		      u32 sw_if_index, u8 is_add)
 {
-  u32 fib_index;
+  l2tvpp_session_t *sess;
+  u32 fib_index, i;
   /* path_add2/remove2 take a vppinfra vector of paths, not a bare
    * pointer - vec_len on a stack struct crashes */
   fib_route_path_t *rpaths = NULL, path = {
@@ -451,9 +537,18 @@ l2tvpp_route_add_del (l2tvpp_main_t * lm, const fib_prefix_t * pfx,
     .frp_weight = 1,
   };
 
-  if (sw_if_index >= vec_len (lm->session_index_by_sw_if_index)
-      || lm->session_index_by_sw_if_index[sw_if_index] == ~0)
+  sess = l2tvpp_session_by_sw_if_index (lm, sw_if_index);
+  if (!sess)
     return VNET_API_ERROR_INVALID_SW_IF_INDEX;
+
+  /* remember what is routed at the session (see l2tvpp_session_t.routes) */
+  vec_foreach_index (i, sess->routes)
+    if (!fib_prefix_cmp (&sess->routes[i], pfx))
+      break;
+  if (is_add && i == vec_len (sess->routes))
+    vec_add1 (sess->routes, *pfx);
+  else if (!is_add && i < vec_len (sess->routes))
+    vec_del1 (sess->routes, i);
 
   path.frp_proto = fib_proto_to_dpo (pfx->fp_proto);
   vec_add1 (rpaths, path);

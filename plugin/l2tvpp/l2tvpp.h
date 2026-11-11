@@ -24,6 +24,7 @@
 #include <vnet/adj/adj.h>
 #include <vnet/fib/fib_node.h>
 #include <vnet/fib/fib_source.h>
+#include <vnet/fib/fib_types.h>
 #include <vppinfra/bihash_8_8.h>
 
 #define L2TVPP_UDP_PORT 1701
@@ -73,6 +74,14 @@ typedef struct
    * fixup adjusts only for the per-packet length instead of recomputing the
    * whole 20-byte header checksum (l2tvpp_build_rewrite_i / l2tvpp_fixup) */
   u16 encap_ip_csum0;
+  /* subscriber /32s this session has in the encap fast-path cache
+   * (lm->encap_adj_by_ip4), so a session delete can drop them even when the
+   * control plane did not remove the routes first */
+  u32 *encap_ip4s;
+  /* subscriber prefixes routed at this session (l2tvpp_route_add_del), so
+   * a session delete takes its routes with it instead of leaving FIB
+   * entries that point at a deleted interface */
+  fib_prefix_t *routes;
 } l2tvpp_session_t;
 
 /* L2TPv2 data header as we emit it: no L, no S, no O */
@@ -97,6 +106,28 @@ static_always_inline u64
 l2tvpp_session_key (u16 local_tid, u16 local_sid)
 {
   return ((u64) local_tid << 16) | local_sid;
+}
+
+/* decap lookup value: session pool index in the low word, the session's
+ * sw_if_index in the high word. l2tvpp-input needs nothing else from the
+ * session, so the hash hit it already paid for saves the pool element load
+ * (a cache line per session with many sessions on a worker). */
+static_always_inline u64
+l2tvpp_session_value (u32 session_index, u32 sw_if_index)
+{
+  return ((u64) sw_if_index << 32) | session_index;
+}
+
+static_always_inline u32
+l2tvpp_session_value_index (u64 value)
+{
+  return (u32) value;
+}
+
+static_always_inline u32
+l2tvpp_session_value_sw_if_index (u64 value)
+{
+  return (u32) (value >> 32);
 }
 
 /* Default depth of the handoff frame queues (frames per target worker);

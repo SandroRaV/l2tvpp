@@ -59,6 +59,28 @@ typedef enum
   L2TVPP_ENCAP_FP_N_NEXT,
 } l2tvpp_encap_fp_next_t;
 
+/* hit = sent straight to ip4-midchain; miss = left to ethernet-input. On an
+ * uplink the misses are everything that is not plain IPv4 to a cached
+ * subscriber /32, so the ratio tells whether subscriber traffic is really
+ * taking the fast path (`show errors`, `show l2tvpp encap-fastpath`). */
+#define foreach_l2tvpp_encap_fp_error                                         \
+  _ (HIT, "fast path hits (to ip4-midchain)")                                 \
+  _ (MISS, "fast path misses (to ethernet-input)")
+
+typedef enum
+{
+#define _(sym, str) L2TVPP_ENCAP_FP_ERROR_##sym,
+  foreach_l2tvpp_encap_fp_error
+#undef _
+    L2TVPP_ENCAP_FP_N_ERROR,
+} l2tvpp_encap_fp_error_t;
+
+static char *l2tvpp_encap_fp_error_strings[] = {
+#define _(sym, str) str,
+  foreach_l2tvpp_encap_fp_error
+#undef _
+};
+
 typedef struct
 {
   u32 dst;
@@ -121,7 +143,7 @@ VLIB_NODE_FN (l2tvpp_encap_fastpath_node) (vlib_main_t * vm,
   u32 n = frame->n_vectors, *from = vlib_frame_vector_args (frame);
   vlib_buffer_t *bufs[VLIB_FRAME_SIZE], **b = bufs;
   u16 nexts[VLIB_FRAME_SIZE], *next = nexts;
-  u32 i;
+  u32 n_hit = 0, i;
 
   vlib_get_buffers (vm, from, bufs, n);
 
@@ -157,6 +179,7 @@ VLIB_NODE_FN (l2tvpp_encap_fastpath_node) (vlib_main_t * vm,
 	}
       if (!hit)
 	next[i] = L2TVPP_ENCAP_FP_NEXT_ETHERNET_INPUT;
+      n_hit += hit;
 
       if (PREDICT_FALSE (b[i]->flags & VLIB_BUFFER_IS_TRACED))
 	{
@@ -169,6 +192,13 @@ VLIB_NODE_FN (l2tvpp_encap_fastpath_node) (vlib_main_t * vm,
     }
 
   vlib_buffer_enqueue_to_next (vm, node, from, nexts, n);
+  /* once per frame, not per packet */
+  if (n_hit)
+    vlib_node_increment_counter (vm, node->node_index,
+				 L2TVPP_ENCAP_FP_ERROR_HIT, n_hit);
+  if (n - n_hit)
+    vlib_node_increment_counter (vm, node->node_index,
+				 L2TVPP_ENCAP_FP_ERROR_MISS, n - n_hit);
   return n;
 }
 
@@ -177,6 +207,8 @@ VLIB_REGISTER_NODE (l2tvpp_encap_fastpath_node) = {
   .vector_size = sizeof (u32),
   .format_trace = format_l2tvpp_encap_fp_trace,
   .type = VLIB_NODE_TYPE_INTERNAL,
+  .n_errors = L2TVPP_ENCAP_FP_N_ERROR,
+  .error_strings = l2tvpp_encap_fp_error_strings,
   .n_next_nodes = L2TVPP_ENCAP_FP_N_NEXT,
   .next_nodes = {
     [L2TVPP_ENCAP_FP_NEXT_ETHERNET_INPUT] = "ethernet-input",
@@ -277,6 +309,19 @@ l2tvpp_show_encap_fastpath_cli (vlib_main_t * vm, unformat_input_t * input,
     vlib_cli_output (vm, "l2tvpp encap-fastpath: no interfaces");
   vlib_cli_output (vm, "cached subscriber adjacencies: %u",
 		   lm->encap_adj_count);
+  {
+    /* node counters are per thread: add them up */
+    vlib_node_t *n = vlib_get_node (vm, l2tvpp_encap_fastpath_node.index);
+    u64 hits = 0, misses = 0;
+
+    foreach_vlib_main ()
+    {
+      vlib_error_main_t *em = &this_vlib_main->error_main;
+      hits += em->counters[n->error_heap_index + L2TVPP_ENCAP_FP_ERROR_HIT];
+      misses += em->counters[n->error_heap_index + L2TVPP_ENCAP_FP_ERROR_MISS];
+    }
+    vlib_cli_output (vm, "hits: %llu  misses: %llu", hits, misses);
+  }
   return 0;
 }
 

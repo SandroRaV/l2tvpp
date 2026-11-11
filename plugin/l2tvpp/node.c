@@ -119,6 +119,7 @@ VLIB_NODE_FN (l2tvpp_input_node) (vlib_main_t * vm,
 	  clib_prefetch_load (vlib_buffer_get_current (b[2]));
 	}
       u32 session_index = ~0, error = L2TVPP_INPUT_ERROR_DECAP;
+      u32 sw_if_index0 = ~0;
       u32 next0;
 
       /* udp-local (or the flow-handoff fast path) leaves current_data at
@@ -191,7 +192,8 @@ VLIB_NODE_FN (l2tvpp_input_node) (vlib_main_t * vm,
 	    error = L2TVPP_INPUT_ERROR_PUNT_NO_SESSION;
 	    goto punt;
 	  }
-	session_index = kv.value;
+	session_index = l2tvpp_session_value_index (kv.value);
+	sw_if_index0 = l2tvpp_session_value_sw_if_index (kv.value);
       }
 
       /* PPP: optional FF 03, then 1- or 2-byte protocol (PFC if the
@@ -220,16 +222,16 @@ VLIB_NODE_FN (l2tvpp_input_node) (vlib_main_t * vm,
 	}
 
       {
-	l2tvpp_session_t *sess =
-	  pool_elt_at_index (lm->sessions, session_index);
 	u32 len0;
 
+	/* sw_if_index comes with the hash hit; the session pool is not
+	 * touched on the data path */
 	vlib_buffer_advance (b0, cur - start);
-	vnet_buffer (b0)->sw_if_index[VLIB_RX] = sess->sw_if_index;
+	vnet_buffer (b0)->sw_if_index[VLIB_RX] = sw_if_index0;
 	vnet_buffer (b0)->sw_if_index[VLIB_TX] = ~0;	/* default FIB */
 	/* inline: current_length unless the buffer is chained */
 	len0 = vlib_buffer_length_in_chain (vm, b0);
-	if (PREDICT_TRUE (sess->sw_if_index == stats_sw_if_index))
+	if (PREDICT_TRUE (sw_if_index0 == stats_sw_if_index))
 	  {
 	    stats_n_packets += 1;
 	    stats_n_bytes += len0;
@@ -240,7 +242,7 @@ VLIB_NODE_FN (l2tvpp_input_node) (vlib_main_t * vm,
 	      vlib_increment_combined_counter (rx_counters, thread_index,
 					       stats_sw_if_index,
 					       stats_n_packets, stats_n_bytes);
-	    stats_sw_if_index = sess->sw_if_index;
+	    stats_sw_if_index = sw_if_index0;
 	    stats_n_packets = 1;
 	    stats_n_bytes = len0;
 	  }
