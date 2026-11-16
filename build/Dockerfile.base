@@ -1,7 +1,8 @@
 # Copyright (c) 2026 Default Gateway GmbH
 # SPDX-License-Identifier: Apache-2.0
 #
-# Base image: Debian 12 with FDio VPP stable/2510 already built (debug) and
+# Base image: Debian 12 with FDio VPP stable/2510 already built (debug and
+# release) and
 # the make-test venv prepared. Rebuilt only when VPP_BRANCH/VPP_COMMIT or the
 # deps change. Every plugin build/test starts from this image, so each run is
 # a clean build of the plugin against an unchanged VPP tree.
@@ -28,6 +29,11 @@ RUN git clone -b ${VPP_BRANCH} --single-branch https://github.com/FDio/vpp . \
 
 # Full debug build once; plugin builds later are incremental on top of it.
 RUN make build
+
+# The release build as well: `make test` runs against the release tree
+# (TAG=vpp) and builds it first. Without it every test run compiles all of
+# VPP (the best part of an hour) instead of only the plugin.
+RUN make build-release
 
 # Prepare the test venv so `make test` does not need network later.
 RUN make test-dep || true
