@@ -10,6 +10,11 @@
 #   plugin-test   every push to main: clean plugin build + make test
 #   vyos-image    manual on main, automatic on a tag: VPP debs, VyOS ISO,
 #                 release notes (and the upload, when PUBLISH_DEST is set)
+#   publish-images  upload the image folders that wait on the build host
+#                 (built while PUBLISH_DEST was not set, or a failed upload)
+#                 and add them to the index of the download host. Manual on
+#                 main; runs by itself in a scheduled pipeline, which
+#                 contains nothing else. A no-op while PUBLISH_DEST is unset.
 #   base-image    manual: rebuild the VPP base image of plugin-test and push
 #                 it to this project's container registry (after a VPP bump)
 #
@@ -46,6 +51,8 @@ stages:
 base-image:
   stage: base
   rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+      when: never
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
       when: manual
       allow_failure: true
@@ -62,6 +69,8 @@ plugin-test:
   stage: test
   needs: []
   rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+      when: never
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
   timeout: 1h
   script:
@@ -83,6 +92,8 @@ vyos-image:
   stage: image
   needs: []
   rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+      when: never
     - if: $CI_COMMIT_TAG
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
       when: manual
@@ -104,3 +115,15 @@ vyos-image:
       - build/iso/*/*-release-notes.md
       - build/iso/*/*-release.json
       - build/iso/*/*.sha256
+
+publish-images:
+  stage: image
+  needs: []
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: manual
+      allow_failure: true
+  timeout: 1h
+  script:
+    - bash build/publish.sh

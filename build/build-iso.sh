@@ -94,28 +94,9 @@ python3 "$REPO/build/release-notes.py" --iso "$DIR/$(basename "$ISO_SRC")" \
   || echo "WARNING: release notes failed - write $DIR/$IMAGE-release-notes.md by hand"
 
 # publish the whole folder (ISO + notes + checksum) to the download host and
-# append the image's line to the index there. An upload failure must not fail
-# the build - copy by hand then.
-if [ -n "$DEST" ]; then
-  if scp -r -o BatchMode=yes -o StrictHostKeyChecking=accept-new "$DIR" "$DEST/"; then
-    echo "published: $IMAGE/ to $DEST"
-    if [ -f "$DIR/$IMAGE-index-line.md" ]; then
-      if ssh -o BatchMode=yes "${DEST%%:*}" "cat >> '${DEST#*:}/vyos-images.md' && cat '${DEST#*:}/vyos-images.md'" \
-           < "$DIR/$IMAGE-index-line.md" > "$DIR/.vyos-images.md"; then
-        echo "index: appended to ${DEST#*:}/vyos-images.md"
-        # browser version of the index, rendered from the appended file
-        python3 "$REPO/build/release-notes.py" --render "$DIR/.vyos-images.md" "$DIR/.vyos-images.html" --title "DGW VyOS images" >/dev/null \
-          && scp -q -o BatchMode=yes "$DIR/.vyos-images.html" "$DEST/vyos-images.html" \
-          && echo "index: vyos-images.html re-rendered" \
-          || echo "WARNING: could not re-render vyos-images.html on ${DEST%%:*}"
-        rm -f "$DIR/.vyos-images.md" "$DIR/.vyos-images.html"
-      else
-        echo "WARNING: could not append to the index vyos-images.md on ${DEST%%:*}"
-      fi
-    fi
-  else
-    echo "WARNING: upload of $IMAGE/ to $DEST failed - copy $DIR by hand"
-  fi
-else
-  echo "not published: set PUBLISH_DEST=user@host:/dir or write it to $LOCALPUB"
-fi
+# add the image to the index there; images of earlier builds that are still
+# waiting go up first. An upload failure must not fail the build: the folder
+# stays in build/iso/ and the next build or the CI job publish-images tries
+# again.
+PUBLISH_DEST="$DEST" PUBLISH_URL="$URL" bash "$REPO/build/publish.sh" \
+  || echo "WARNING: publishing failed - run build/publish.sh again"

@@ -127,9 +127,20 @@ needs `L2TVPP_REV=<commit>`, otherwise the notes say "unknown".
 The whole folder is uploaded to a download host when `PUBLISH_DEST=user@host:/dir`
 is set or line 1 of `build/publish.local` (gitignored) holds that value; line 2 (or
 `PUBLISH_URL`) is the public base URL for the install line in the notes. The
-upload also appends one line per image to `vyos-images.md` on the host and
+upload also adds one line per image to `vyos-images.md` on the host and
 re-renders `vyos-images.html` from it. Without a destination the script only
-prints where the folder is. The vpp-vlan-fast repo's build (l2tvpp plus a
+prints where the folder is, and the notes carry `<download-url>` in place of
+the public URL.
+
+The upload is `build/publish.sh`, which `build-iso.sh` calls at the end. It
+sends every image folder in `build/iso/` that has no `.published` marker
+yet, oldest first, fills the public URL into its notes and uses `rsync`
+only, so the upload account on the download host can be limited to its
+directory. An image built without a destination, or whose upload failed,
+goes up with the next run: by hand, with the next build, or with the CI job
+`publish-images` (manual on `main`, automatic in a scheduled pipeline).
+`build-iso.sh` keeps the three newest image folders; an image that waits
+longer than three builds is gone. The vpp-vlan-fast repo's build (l2tvpp plus a
 second plugin in one image) calls the same `release-notes.py` with
 `--vlanfast`/`--variant`.
 
