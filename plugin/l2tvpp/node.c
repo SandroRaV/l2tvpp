@@ -35,6 +35,8 @@ typedef enum
   _ (PUNT_CONTROL, "control message, punted")             \
   _ (PUNT_NO_SESSION, "unknown session, punted")          \
   _ (PUNT_PPP_PROTO, "non-IP PPP protocol, punted")       \
+  _ (PUNT_IP6_LOCAL, "IPv6 link-local/multicast, punted") \
+  _ (PUNT_LNS_ADDRESS, "for the LNS itself, punted")       \
   _ (PUNT_UNSUPPORTED, "not v2, punted")                  \
   _ (TOO_SHORT, "truncated, dropped")
 
@@ -102,6 +104,9 @@ VLIB_NODE_FN (l2tvpp_input_node) (vlib_main_t * vm,
   u32 stats_sw_if_index = ~0, stats_n_packets = 0, stats_n_bytes = 0;
   const u16 next_ip4 = lm->inner_ip4_no_checksum
     ? L2TVPP_INPUT_NEXT_IP4_INPUT_NCS : L2TVPP_INPUT_NEXT_IP4_INPUT;
+  /* the LNS's own addresses inside the sessions (normally one) */
+  const u32 *punt_ip4s = lm->punt_ip4s;
+  const u32 n_punt_ip4s = vec_len (punt_ip4s);
 
   from = vlib_frame_vector_args (frame);
   vlib_get_buffers (vm, from, bufs, n_left);
@@ -212,9 +217,42 @@ VLIB_NODE_FN (l2tvpp_input_node) (vlib_main_t * vm,
 	}
 
       if (ppp_proto == PPP_PROTO_IP4)
-	next0 = next_ip4;
+	{
+	  /* a packet for the LNS's own address on the kernel session netdev
+	   * (the subscriber pings its gateway) is answered by the kernel:
+	   * same way as LCP. The destination is at byte 16 of the header; a
+	   * header too short to hold it is left to ip4-input to drop. */
+	  if (n_punt_ip4s && cur + 20 <= start + b0->current_length)
+	    {
+	      u32 dst = clib_mem_unaligned (cur + 16, u32), i;
+
+	      for (i = 0; i < n_punt_ip4s; i++)
+		if (PREDICT_FALSE (dst == punt_ip4s[i]))
+		  {
+		    error = L2TVPP_INPUT_ERROR_PUNT_LNS_ADDRESS;
+		    goto punt;
+		  }
+	    }
+	  next0 = next_ip4;
+	}
       else if (ppp_proto == PPP_PROTO_IP6)
-	next0 = L2TVPP_INPUT_NEXT_IP6_INPUT;
+	{
+	  /* Router solicitations, neighbour discovery and DHCPv6 from the
+	   * subscriber are answered by accel-ppp on the kernel session
+	   * interface, not by VPP: a packet to a multicast (ff00::/8) or
+	   * link-local (fe80::/10) destination goes the same way as LCP.
+	   * The destination address starts at byte 24 of the IPv6 header;
+	   * a header too short to hold it is left to ip6-input to drop. */
+	  if (PREDICT_FALSE (cur + 26 <= start + b0->current_length
+			     && (cur[24] == 0xff
+				 || (cur[24] == 0xfe
+				     && (cur[25] & 0xc0) == 0x80))))
+	    {
+	      error = L2TVPP_INPUT_ERROR_PUNT_IP6_LOCAL;
+	      goto punt;
+	    }
+	  next0 = L2TVPP_INPUT_NEXT_IP6_INPUT;
+	}
       else
 	{
 	  error = L2TVPP_INPUT_ERROR_PUNT_PPP_PROTO;

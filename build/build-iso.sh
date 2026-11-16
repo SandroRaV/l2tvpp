@@ -47,6 +47,7 @@ install -m 0755 "$REPO"/build/vyos-hooks/*.chroot \
 INC="$WORK/vyos-build/data/live-build-config/includes.chroot"
 install -d "$INC/usr/libexec/l2tvpp" "$INC/lib/systemd/system"
 install -m 0755 "$REPO"/syncd/l2tvppd.py "$INC/usr/libexec/l2tvpp/l2tvppd.py"
+install -m 0644 "$REPO"/syncd/l2tvpp_acct.py "$INC/usr/libexec/l2tvpp/l2tvpp_acct.py"
 install -m 0644 "$REPO"/build/vyos-image/l2tvppd.service "$INC/lib/systemd/system/l2tvppd.service"
 
 # finished images are kept in build/iso/<image>/ below (ISO + release notes),

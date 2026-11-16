@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 /* L2TPv2 LNS data plane plugin: binary API */
-option version = "0.1.0";
+option version = "0.2.0";
 
 import "vnet/interface_types.api";
 import "vnet/ip/ip_types.api";
@@ -132,6 +132,35 @@ autoreply define l2tvpp_route_add_del
   bool is_add;
   vl_api_prefix_t prefix;
   vl_api_interface_index_t sw_if_index;
+};
+
+/** \brief Add or delete an address of the LNS itself that subscribers reach
+    through their session: the local address of the kernel session netdevs
+    (accel-ppp's gw-ip-address). A decapsulated IPv4 packet for such an
+    address is not routed by VPP - VPP does not own the address - but handed
+    to the kernel session like LCP, so a subscriber can ping its gateway.
+    Adding an address twice is not an error.
+    @param address  IPv4 address (IPv6: link-local and multicast are always
+                    handed to the kernel, see l2tvpp-input)
+*/
+autoreply define l2tvpp_punt_address_add_del
+{
+  u32 client_index;
+  u32 context;
+  bool is_add;
+  vl_api_address_t address;
+};
+
+define l2tvpp_punt_address_dump
+{
+  u32 client_index;
+  u32 context;
+};
+
+define l2tvpp_punt_address_details
+{
+  u32 context;
+  vl_api_address_t address;
 };
 
 /** \brief Enable/disable worker handoff by session index (for NICs whose

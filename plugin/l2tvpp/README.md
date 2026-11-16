@@ -15,6 +15,13 @@ See `../../docs/design.md` step 3. Files to be written in M1:
 `l2tvpp.h` holds the one L2TPv2 header parser (`l2tvpp_parse_hdr`) all three
 input-side nodes use, and the `(tid, sid)` -> worker hash.
 
+CLI beyond tunnels, sessions and routes: `l2tvpp punt-address [del] <ip4>`
+and `show l2tvpp punt-address` list the LNS's own IPv4 addresses inside the
+sessions (accel-ppp's gateway address). `l2tvpp-input` hands a decapsulated
+packet for one of them to the kernel session, like LCP, as it does with
+IPv6 to a link-local or multicast destination. `l2tvppd` maintains the
+list.
+
 `startup.conf` knobs:
 
 ```

@@ -83,6 +83,49 @@ vl_api_l2tvpp_route_add_del_t_handler (vl_api_l2tvpp_route_add_del_t * mp)
 }
 
 static void
+vl_api_l2tvpp_punt_address_add_del_t_handler
+  (vl_api_l2tvpp_punt_address_add_del_t * mp)
+{
+  l2tvpp_main_t *lm = &l2tvpp_main;
+  vl_api_l2tvpp_punt_address_add_del_reply_t *rmp;
+  ip46_address_t addr;
+  int rv;
+
+  ip_address_decode (&mp->address, &addr);
+  rv = l2tvpp_punt_address_add_del (lm, &addr, mp->is_add);
+
+  REPLY_MACRO (VL_API_L2TVPP_PUNT_ADDRESS_ADD_DEL_REPLY);
+}
+
+static void
+vl_api_l2tvpp_punt_address_dump_t_handler (vl_api_l2tvpp_punt_address_dump_t
+					   * mp)
+{
+  l2tvpp_main_t *lm = &l2tvpp_main;
+  vl_api_l2tvpp_punt_address_details_t *rmp;
+  vl_api_registration_t *reg;
+  u32 *a;
+
+  reg = vl_api_client_index_to_registration (mp->client_index);
+  if (!reg)
+    return;
+
+  vec_foreach (a, lm->punt_ip4s)
+  {
+    ip46_address_t addr = { 0 };
+
+    addr.ip4.as_u32 = *a;
+    rmp = vl_msg_api_alloc_zero (sizeof (*rmp));
+    rmp->_vl_msg_id =
+      clib_host_to_net_u16 (VL_API_L2TVPP_PUNT_ADDRESS_DETAILS +
+			    lm->msg_id_base);
+    rmp->context = mp->context;
+    ip_address_encode (&addr, IP46_TYPE_IP4, &rmp->address);
+    vl_api_send_msg (reg, (u8 *) rmp);
+  }
+}
+
+static void
 send_tunnel_details (l2tvpp_main_t * lm, vl_api_registration_t * reg,
 		     u32 context, l2tvpp_tunnel_t * t)
 {

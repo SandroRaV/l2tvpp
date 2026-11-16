@@ -70,10 +70,6 @@ typedef struct
   u8 pfc;
   u32 sw_if_index;		/* the l2tvpp session interface */
   u32 hw_if_index;
-  /* checksum of the constant outer IPv4 encap header with length=0, so the
-   * fixup adjusts only for the per-packet length instead of recomputing the
-   * whole 20-byte header checksum (l2tvpp_build_rewrite_i / l2tvpp_fixup) */
-  u16 encap_ip_csum0;
   /* subscriber /32s this session has in the encap fast-path cache
    * (lm->encap_adj_by_ip4), so a session delete can drop them even when the
    * control plane did not remove the routes first */
@@ -82,6 +78,11 @@ typedef struct
    * a session delete takes its routes with it instead of leaving FIB
    * entries that point at a deleted interface */
   fib_prefix_t *routes;
+  /* the FIB each of those routes was installed in (parallel to routes). The
+   * session interface can be moved to another table while it has routes
+   * (accel-ppp puts the session into a VRF, Accel-VRF-Name); the routes are
+   * then removed from where they are, not from where the interface is now */
+  u32 *route_fib_indices;
 } l2tvpp_session_t;
 
 /* L2TPv2 data header as we emit it: no L, no S, no O */
@@ -157,6 +158,12 @@ typedef struct
    * FCS-protected, the software header checksum costs ~55 clocks/packet */
   u8 inner_ip4_no_checksum;
   fib_source_t fib_src;		/* subscriber routes; see L2TVPP_FIB_SOURCE_PRIORITY */
+  /* IPv4 addresses of the LNS itself on the kernel session netdevs (the
+   * PPP gateway address, network byte order): a decapsulated packet for one
+   * of them goes to the kernel session, not into the FIB. Normally a single
+   * address; l2tvpp-input compares against each. Changed under the worker
+   * barrier (API and CLI handlers hold it). */
+  u32 *punt_ip4s;
   /* encap fast path: subscriber dst IPv4 -> the session's midchain adj_index,
    * populated by l2tvpp_route_add_del. l2tvpp-encap-fastpath (a device-input
    * feature on the uplink) uses it to jump plain uplink->subscriber packets
@@ -249,5 +256,7 @@ int l2tvpp_session_add_del (l2tvpp_main_t * lm, u32 tunnel_index,
 			   u8 is_add, u32 * sw_if_indexp);
 int l2tvpp_route_add_del (l2tvpp_main_t * lm, const fib_prefix_t * pfx,
 			 u32 sw_if_index, u8 is_add);
+int l2tvpp_punt_address_add_del (l2tvpp_main_t * lm,
+				 const ip46_address_t * addr, u8 is_add);
 
 #endif /* __included_l2tvpp_h__ */

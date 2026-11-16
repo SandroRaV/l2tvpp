@@ -30,6 +30,26 @@ For every kernel session the daemon ensures, in VPP:
                            downstream traffic would keep punting)
 and removes, in reverse, whatever VPP has that the kernel no longer does.
 
+What accel-ppp sets on the kernel netdev is carried over to the VPP session
+interface, on every pass, because with l2tvpp the netdev itself no longer
+carries the data traffic:
+  VRF   the netdev's master (accel-ppp enslaves it for Accel-VRF-Name in the
+        RADIUS reply or a CoA) -> the interface is bound to the VPP table
+        with the VRF's table id, and the subscriber routes go there
+  MTU   the netdev MTU (negotiated MRU / Framed-MTU) -> the interface's L3
+        MTU, so VPP fragments or answers "fragmentation needed" at the
+        subscriber's real MTU
+  uRPF  strict source validation on the interface (--urpf): a subscriber can
+        only send from the addresses and prefixes routed at its session.
+        Needs VPP's urpf plugin; without it the daemon says so and goes on.
+Accounting counters: see l2tvpp_acct.py (--radius-listen).
+
+The LNS's own address on the session netdevs (accel-ppp's gw-ip-address, the
+`inet LOCAL peer ...` of each netdev) is registered with the plugin
+(l2tvpp_punt_address_add_del): VPP does not own that address, so a packet a
+subscriber sends to it (a ping to its gateway) is handed to the kernel
+session like LCP instead of being routed.
+
 Event sources (pick with --mode)
   reconcile : one full kernel<->VPP reconcile pass, then exit. Idempotent;
               safe to run from cron or by hand. This is also what runs on
@@ -54,6 +74,7 @@ import re
 import signal
 import subprocess
 import sys
+import threading
 import time
 
 log = logging.getLogger("l2tvppd")
@@ -101,23 +122,68 @@ def parse_pppol2tp(text):
     return sessions
 
 
+LINK_RE = re.compile(
+    r"^(\d+):\s+([^:@\s]+)(?:@[^:\s]+)?:\s+<[^>]*>\s+mtu\s+(\d+)")
+MASTER_RE = re.compile(r"\smaster\s+(\S+)")
+VRF_TABLE_RE = re.compile(r"\svrf\s+table\s+(\d+)")
+
+
+def parse_links(text):
+    """`ip -d -o link show` -> {ifname: {"mtu": int, "table": int,
+    "ifindex": int}}. table is the routing table of the VRF the interface
+    is enslaved to, 0 for the default table (no master, or a master that is
+    not a VRF). Pure, so it is tested."""
+    links, vrfs = {}, {}
+    for line in text.splitlines():
+        m = LINK_RE.match(line)
+        if not m:
+            continue
+        master = MASTER_RE.search(line)
+        links[m.group(2)] = (int(m.group(3)),
+                             master.group(1) if master else None,
+                             int(m.group(1)))
+        t = VRF_TABLE_RE.search(line)
+        if t:
+            vrfs[m.group(2)] = int(t.group(1))
+    return {name: {"mtu": mtu, "table": vrfs.get(master, 0),
+                   "ifindex": ifindex}
+            for name, (mtu, master, ifindex) in links.items()}
+
+
+def kernel_links(run=subprocess.run):
+    """MTU, VRF table and interface index of every interface in one `ip`
+    call."""
+    try:
+        out = run(["ip", "-d", "-o", "link", "show"],
+                  capture_output=True, text=True).stdout
+    except FileNotFoundError:
+        return {}
+    return parse_links(out)
+
+
 ADDR4_RE = re.compile(
-    r"^\d+:\s+(\S+)\s+inet\s+\S+\s+peer\s+([0-9.]+)/32", re.M)
+    r"^\d+:\s+(\S+)\s+inet\s+(\S+)\s+peer\s+([0-9.]+)/32", re.M)
 ADDR6_RE = re.compile(
     r"^\d+:\s+(\S+)\s+inet6\s+[0-9A-Fa-f:]+\s+peer\s+([0-9A-Fa-f:]+)/128", re.M)
 ROUTE_DEV_RE = re.compile(r"\sdev\s+(\S+)")
+# `ip route show table all` prefixes a route with its type unless it is a
+# plain unicast one; none of these is a prefix to route at the subscriber
+# (`local` is the LNS's own address on the session)
+ROUTE_TYPES_SKIPPED = frozenset((
+    "local", "broadcast", "multicast", "anycast", "unreachable", "blackhole",
+    "prohibit", "throw", "nat", "default"))
 
 
 def parse_ppp_routes(addr_text, route_text):
     """Subscriber prefixes per interface, {ifname: [prefix, ...]}: the peer
     /32 (IPv4), any global peer /128 (IPv6), and prefixes routed at the
     interface (delegated prefixes, framed routes). addr_text is `ip -o addr
-    show`, route_text the concatenated `ip -o -4 route show` and `ip -o -6
-    route show`, all WITHOUT a dev filter: one dump covers every session.
-    Pure, so it is tested."""
+    show`, route_text the concatenated `ip -o -4 route show table all` and
+    `ip -o -6 route show table all`, all WITHOUT a dev filter: one dump
+    covers every session, in whatever VRF it is. Pure, so it is tested."""
     routes = {}
     for m in ADDR4_RE.finditer(addr_text):
-        routes.setdefault(m.group(1), set()).add(m.group(2) + "/32")
+        routes.setdefault(m.group(1), set()).add(m.group(3) + "/32")
     for m in ADDR6_RE.finditer(addr_text):
         if not m.group(2).lower().startswith("fe80"):   # skip link-local
             routes.setdefault(m.group(1), set()).add(m.group(2) + "/128")
@@ -127,10 +193,38 @@ def parse_ppp_routes(addr_text, route_text):
         m = ROUTE_DEV_RE.search(line)
         if not fields or not m:
             continue
-        pfx = fields[0]
-        if "/" in pfx and not pfx.startswith(("fe80", "169.254")):
-            routes.setdefault(m.group(1), set()).add(pfx)
+        if fields[0] in ROUTE_TYPES_SKIPPED:
+            continue
+        pfx = fields[1] if fields[0] == "unicast" else fields[0]
+        if pfx.startswith(("fe80", "169.254")):
+            continue
+        if "/" not in pfx:
+            # a host route is printed without its length
+            if not re.match(r"^[0-9A-Fa-f:.]+$", pfx):
+                continue
+            pfx += "/128" if ":" in pfx else "/32"
+        routes.setdefault(m.group(1), set()).add(pfx)
     return {ifname: sorted(pfxs) for ifname, pfxs in routes.items()}
+
+
+def parse_ppp_local4(addr_text):
+    """{ifname: the LNS's own IPv4 address on that point-to-point netdev}
+    from `ip -o addr show`. Pure, so it is tested."""
+    return {m.group(1): m.group(2).split("/")[0]
+            for m in ADDR4_RE.finditer(addr_text)}
+
+
+def kernel_addrs_routes(run=subprocess.run):
+    """(subscriber prefixes per interface, LNS address per interface) from
+    the same three `ip` calls, see kernel_routes."""
+    def out(*args):
+        return run(["ip", "-o"] + list(args),
+                   capture_output=True, text=True).stdout
+    addr = out("addr", "show")
+    return (parse_ppp_routes(
+        addr, out("-4", "route", "show", "table", "all")
+        + out("-6", "route", "show", "table", "all")),
+        parse_ppp_local4(addr))
 
 
 def kernel_routes(run=subprocess.run):
@@ -138,13 +232,9 @@ def kernel_routes(run=subprocess.run):
     the session count (a per-interface query costs two process spawns per
     session, which turns a mass reconnect into minutes of install latency).
     The IPv6 table has to be asked for explicitly: a plain `ip route show`
-    lists IPv4 only, so delegated prefixes would never be seen."""
-    def out(*args):
-        return run(["ip", "-o"] + list(args),
-                   capture_output=True, text=True).stdout
-    return parse_ppp_routes(
-        out("addr", "show"),
-        out("-4", "route", "show") + out("-6", "route", "show"))
+    lists IPv4 only, so delegated prefixes would never be seen. `table all`
+    because the routes of a session in a VRF are in the VRF's table."""
+    return kernel_addrs_routes(run)[0]
 
 
 TUNNEL_RE = re.compile(r"^Tunnel\s+(?P<tid>\d+),")
@@ -238,19 +328,35 @@ class Syncd:
     client only needs the l2tvpp_* and ip_route_add_del calls; a make-test
     can pass VPP's own test-framework client instead of a real one."""
 
-    def __init__(self, vpp, local_ip=None, local_port=1701, state_path=None):
+    def __init__(self, vpp, local_ip=None, local_port=1701, state_path=None,
+                 urpf="strict", acct=None):
         self.vpp = vpp
+        # source validation on the session interfaces: strict | loose | off
+        self.urpf = urpf
+        self.urpf_missing = False       # VPP has no urpf plugin loaded
+        # l2tvpp_acct.AcctSessions, told which sessions are in VPP and their
+        # last counters when they go (None: no accounting relay)
+        self.acct = acct
+        self._tables = None             # VPP FIB tables, read once per pass
+        # the LNS's own addresses registered with the plugin: None = not
+        # read from VPP yet, False = the plugin has no such call (older)
+        self.punt4 = None
         # fallback local endpoint; per-session values from `ip l2tp show
         # tunnel` (s["local_ip"]) take precedence, so this is usually unused
         self.local_ip = local_ip
         self.local_port = local_port
         # session_key(str) -> installed record {sw_if_index, tunnel_index,
-        # local_sid, peer_sid, tunnel_key, routes[]}. This is what the daemon
+        # local_sid, peer_sid, tunnel_key, routes[], ifname, ifindex, table,
+        # mtu, urpf}. This is what the daemon
         # installed, so it knows exactly what to remove; it is the source for
         # route teardown (the FIB is not re-dumped). Persisted so a daemon
         # restart does not lose track of prior installs.
         self.state_path = state_path
         self.installed = self._load_state()
+        if self.acct:
+            for key, rec in self.installed.items():
+                self.acct.installed(key, rec.get("ifname"), rec["sw_if_index"],
+                                    rec.get("ifindex"))
         # check our record against what VPP really holds on the next pass:
         # set at start (the state file may predate a VPP restart) and after
         # a failed pass or a reconnect
@@ -327,6 +433,8 @@ class Syncd:
             d = live.get((rec["tunnel_index"], rec["local_sid"]))
             if d is None or d.sw_if_index != rec["sw_if_index"]:
                 del self.installed[key]
+                if self.acct:
+                    self.acct.removed(key, None)
                 log.warning("session %s (sw_if_index %d) is not in VPP any "
                             "more; re-installing", key, rec["sw_if_index"])
 
@@ -348,6 +456,7 @@ class Syncd:
             # adopt it instead of failing on "already exists" every pass.
             # Route adds are idempotent in the plugin.
             swif = d.sw_if_index
+            table = self._get_table(swif)
             log.info("session tid %d sid %d already in VPP, adopting "
                      "sw_if_index %d", s["local_tid"], s["local_sid"], swif)
         else:
@@ -355,18 +464,181 @@ class Syncd:
                 is_add=True, tunnel_index=tidx,
                 local_sid=s["local_sid"], peer_sid=s["peer_sid"],
                 acfc=False, pfc=False), "session add").sw_if_index
-        # record before the routes go in, so a failed route add leaves a
-        # session we know about (and whose routes the next pass completes)
+            table = 0
+        key = "%d/%d" % session_key(s)
         rec = {"sw_if_index": swif, "tunnel_index": tidx,
                "local_sid": s["local_sid"], "peer_sid": s["peer_sid"],
-               "tunnel_key": list(tunnel_key(s)), "routes": []}
-        self.installed["%d/%d" % session_key(s)] = rec
+               "tunnel_key": list(tunnel_key(s)), "routes": [],
+               "ifname": s["ifname"], "ifindex": s.get("ifindex"),
+               "table": table, "mtu": None, "urpf": None}
+        # VRF, MTU and source validation before any route: a session that
+        # cannot be put into its VRF must not forward in the default table,
+        # so it is taken out of VPP again and stays on the kernel path
+        try:
+            self.sync_attrs(key, s, rec)
+        except RuntimeError:
+            self._check(self.vpp.l2tvpp_session_add_del(
+                is_add=False, tunnel_index=tidx, local_sid=s["local_sid"],
+                peer_sid=s["peer_sid"]), "session del")
+            if self.acct:
+                self.acct.removed(key, None)
+            raise
+        # record before the routes go in, so a failed route add leaves a
+        # session we know about (and whose routes the next pass completes)
+        self.installed[key] = rec
         for pfx in s["routes"]:
             self._route(pfx, swif, is_add=1)
             rec["routes"].append(pfx)
         log.info("session + tid %d sid %d -> sw_if_index %d (%d routes)",
                  s["local_tid"], s["local_sid"], swif, len(s["routes"]))
         return swif
+
+    # -- what accel-ppp set on the kernel netdev ---------------------------
+    def sync_attrs(self, key, s, rec):
+        """Carry the netdev's VRF and MTU over to the session interface and
+        apply source validation. Only what differs from the record costs an
+        API call. Returns True if the interface changed table: its routes
+        were removed and the caller has to put them back."""
+        swif = rec["sw_if_index"]
+        moved = False
+        table = s.get("table") or 0
+        if rec.get("table", 0) != table:
+            # routes first: the plugin removes a route from the table it
+            # was installed in, but nothing may point into the old table
+            # once the session belongs to another VRF
+            for pfx in list(rec["routes"]):
+                self._route(pfx, swif, is_add=0)
+                rec["routes"].remove(pfx)
+            self._set_table(swif, table)
+            log.info("session %s (%s) table %d -> %d", key, s["ifname"],
+                     rec.get("table", 0), table)
+            rec["table"] = table
+            rec["urpf"] = None          # checked against the new table
+            moved = True
+        mtu = s.get("mtu")
+        if mtu and rec.get("mtu") != mtu:
+            self._check(self.vpp.sw_interface_set_mtu(
+                sw_if_index=swif, mtu=[mtu, 0, 0, 0]), "set mtu %d" % mtu)
+            rec["mtu"] = mtu
+        if rec.get("urpf") != self.urpf and not self.urpf_missing:
+            self._set_urpf(swif, self.urpf, table)
+            rec["urpf"] = self.urpf
+        rec["ifname"] = s["ifname"]
+        # the interface index tells this session's netdev from an earlier
+        # one of the same name (accounting, see l2tvpp_acct.py)
+        rec["ifindex"] = s.get("ifindex")
+        if self.acct:
+            self.acct.installed(key, s["ifname"], swif, rec["ifindex"])
+        return moved
+
+    def _get_table(self, sw_if_index):
+        return self._check(self.vpp.sw_interface_get_table(
+            sw_if_index=sw_if_index, is_ipv6=False), "get table").vrf_id
+
+    def _set_table(self, sw_if_index, table):
+        """Bind the session interface to the VPP table with this id, IPv4
+        and IPv6. VyOS creates the VPP table of a VRF only when the VRF has
+        VPP interfaces of its own; a table that is missing is created, so
+        the subscribers of that VRF at least reach each other and nothing
+        of theirs is forwarded in the default table."""
+        for is_ip6 in (False, True):
+            if table:
+                if self._tables is None:
+                    self._tables = {(t.table.table_id, bool(t.table.is_ip6))
+                                    for t in self.vpp.ip_table_dump()}
+                if (table, is_ip6) not in self._tables:
+                    self._check(self.vpp.ip_table_add_del(
+                        is_add=True,
+                        table={"table_id": table, "is_ip6": is_ip6,
+                               "name": "l2tvpp-%d" % table}),
+                        "table %d add" % table)
+                    self._tables.add((table, is_ip6))
+                    log.warning("VPP had no %s table %d; created it for the "
+                                "sessions of that VRF",
+                                "IPv6" if is_ip6 else "IPv4", table)
+            self._check(self.vpp.sw_interface_set_table(
+                sw_if_index=sw_if_index, is_ipv6=is_ip6, vrf_id=table),
+                "set table %d" % table)
+
+    URPF_MODES = {"off": 0, "loose": 1, "strict": 2}
+
+    def _set_urpf(self, sw_if_index, mode, table=0):
+        """Source validation on the session interface, IPv4 and IPv6, with
+        VPP's urpf plugin. Always switched off first: the plugin keeps its
+        per-interface state when an interface is deleted, and a session
+        interface that reuses the index would otherwise be taken as already
+        configured and stay unprotected.
+
+        urpf_update_v2 with table_id ~0 checks against the table the
+        interface is bound to and follows a rebind. The older urpf_update
+        pins the check to the default table (its handler passes table 0),
+        which drops every packet of a session in a VRF: with only that call
+        available, a session outside the default table runs unchecked."""
+        update = v2 = None
+        try:
+            update = v2 = self.vpp.urpf_update_v2
+        except AttributeError:
+            try:
+                update = self.vpp.urpf_update
+            except AttributeError:
+                pass
+        if update is None:
+            self.urpf_missing = True
+            if mode != "off":
+                log.warning("VPP has no urpf plugin loaded: sessions run "
+                            "WITHOUT source validation (enable "
+                            "urpf_plugin.so, or start with --urpf off)")
+            return
+        if v2 is None and table and mode != "off":
+            log.warning("this VPP only has the old urpf_update call: no "
+                        "source validation for sw_if_index %d in table %d",
+                        sw_if_index, table)
+            mode = "off"
+        extra = {"table_id": 0xFFFFFFFF} if v2 else {}
+        for af in (0, 1):               # ADDRESS_IP4, ADDRESS_IP6
+            self._check(update(is_input=True, mode=0, af=af,
+                               sw_if_index=sw_if_index, **extra), "urpf off")
+            if mode != "off":
+                self._check(update(is_input=True, mode=self.URPF_MODES[mode],
+                                   af=af, sw_if_index=sw_if_index, **extra),
+                            "urpf %s" % mode)
+
+    def sync_punt_addresses(self, want):
+        """Register the LNS's own session addresses with the plugin and
+        drop the ones no session has any more. The set VPP holds is read
+        once (and again after a reconnect), then kept in step."""
+        if self.punt4 is False:
+            return
+        if self.punt4 is None:
+            try:
+                self.punt4 = {str(d.address)
+                              for d in self.vpp.l2tvpp_punt_address_dump()}
+            except AttributeError:
+                self.punt4 = False
+                log.warning("this l2tvpp plugin cannot hand packets for the "
+                            "LNS's own address to the kernel: subscribers "
+                            "cannot ping their gateway")
+                return
+        for addr in sorted(want - self.punt4):
+            self._check(self.vpp.l2tvpp_punt_address_add_del(
+                is_add=True, address=addr), "punt address add %s" % addr)
+            self.punt4.add(addr)
+            log.info("LNS address + %s", addr)
+        for addr in sorted(self.punt4 - want):
+            self._check(self.vpp.l2tvpp_punt_address_add_del(
+                is_add=False, address=addr), "punt address del %s" % addr)
+            self.punt4.discard(addr)
+            log.info("LNS address - %s", addr)
+
+    def session_counters(self, sw_if_index):
+        """(rx_packets, rx_bytes, tx_packets, tx_bytes) of a session
+        interface, None if VPP does not have it (any more)."""
+        try:
+            for d in self.vpp.l2tvpp_session_dump(sw_if_index=sw_if_index):
+                return (d.rx_packets, d.rx_bytes, d.tx_packets, d.tx_bytes)
+        except Exception as e:
+            log.debug("session counters of sw_if_index %d: %s", sw_if_index, e)
+        return None
 
     def sync_routes(self, s):
         """Bring an already-installed session's routes in line with the
@@ -387,13 +659,24 @@ class Syncd:
 
     def del_session(self, key):
         rec = self.installed[key]
+        # the last counters, for the accounting stop record
+        counters = (self.session_counters(rec["sw_if_index"])
+                    if self.acct else None)
         for pfx in rec["routes"]:
             self._route(pfx, rec["sw_if_index"], is_add=0)
+        if rec.get("urpf") not in (None, "off"):
+            try:
+                self._set_urpf(rec["sw_if_index"], "off")
+            except RuntimeError as e:
+                log.debug("urpf off on sw_if_index %d: %s",
+                          rec["sw_if_index"], e)
         self._check(self.vpp.l2tvpp_session_add_del(
             is_add=False, tunnel_index=rec["tunnel_index"],
             local_sid=rec["local_sid"], peer_sid=rec["peer_sid"]),
             "session del")
         del self.installed[key]
+        if self.acct:
+            self.acct.removed(key, counters)
         log.info("session - %s (sw_if_index %d)", key, rec["sw_if_index"])
 
     def prune_tunnels(self):
@@ -439,25 +722,51 @@ class Syncd:
             live = self.vpp_sessions()
             self.drop_stale_records(live)
         self.verify_state = True        # until this pass ends cleanly
-        kroutes = []                    # fetched once, on first need
+        self._tables = None
+        kroutes, klinks = [], []        # fetched once, on first need
 
         def fill_routes(s):
             if s.get("routes") is None:
                 if not kroutes:
-                    kroutes.append(kernel_routes(run))
-                s["routes"] = kroutes[0].get(s["ifname"], [])
+                    kroutes.append(kernel_addrs_routes(run))
+                s["routes"] = kroutes[0][0].get(s["ifname"], [])
+                s.setdefault("local4", kroutes[0][1].get(s["ifname"]))
+
+        def fill_attrs(s):
+            """VRF table and MTU of the session netdev. The routes are read
+            BEFORE the links on purpose: accel-ppp enslaves the netdev to
+            its VRF before it adds addresses and routes, so a route seen
+            here always comes with the VRF it belongs to. The other order
+            could install a route in the default table for one pass."""
+            fill_routes(s)
+            if "table" not in s or "mtu" not in s or "ifindex" not in s:
+                if not klinks:
+                    klinks.append(kernel_links(run))
+                link = klinks[0].get(s["ifname"], {})
+                s.setdefault("table", link.get("table", 0))
+                s.setdefault("mtu", link.get("mtu"))
+                s.setdefault("ifindex", link.get("ifindex"))
 
         added = removed = failed = 0
+        for s in want.values():
+            fill_attrs(s)
+        try:
+            # before the sessions: a session must never forward a packet
+            # meant for the LNS itself
+            self.sync_punt_addresses(
+                {s["local4"] for s in want.values() if s.get("local4")})
+        except RuntimeError as e:
+            failed += 1
+            log.error("LNS addresses: %s", e)
         for key, s in want.items():
             try:
                 if key not in self.installed:
-                    fill_routes(s)
                     if live is None:
                         live = self.vpp_sessions()
                     self.add_session(s, tunnels_cache, run=run, live=live)
                     added += 1
-                elif sync_existing_routes:
-                    fill_routes(s)
+                elif (self.sync_attrs(key, s, self.installed[key])
+                      or sync_existing_routes):
                     self.sync_routes(s)
             except RuntimeError as e:
                 failed += 1
@@ -495,14 +804,33 @@ def connect_vpp():
     return vpp
 
 
-def run_once(local_ip, local_port, state_path):
+class LockedApi:
+    """vpp_papi calls one at a time. The reconcile loop and the accounting
+    relay (its own thread, reading session counters) share one API
+    connection; the lock is held per call, so the relay never waits for a
+    whole reconcile pass."""
+
+    def __init__(self, api, lock):
+        self._api = api
+        self._lock = lock
+
+    def __getattr__(self, name):
+        fn = getattr(self._api, name)   # AttributeError: no such message
+
+        def call(*args, **kwargs):
+            with self._lock:
+                return fn(*args, **kwargs)
+        return call
+
+
+def run_once(args):
     vpp = connect_vpp()
     try:
         # real vpp_papi exposes API calls under vpp.api.<name>; the test
         # framework's provider exposes them at the top level, so Syncd always
         # gets an object whose l2tvpp_* / ip_route_add_del are top-level
-        return Syncd(vpp.api, local_ip, local_port, state_path).reconcile(
-            kernel_sessions())
+        return Syncd(vpp.api, args.local_ip, args.local_port, args.state,
+                     urpf=args.urpf).reconcile(kernel_sessions())
     finally:
         vpp.disconnect()
 
@@ -520,15 +848,51 @@ def connect_vpp_retry(interval):
             time.sleep(interval)
 
 
-def run_daemon(local_ip, local_port, interval, state_path):
+def start_radius_relay(args, sync):
+    """The accounting relay (l2tvpp_acct.py), if --radius-listen asks for
+    it. Returns the AcctSessions object the Syncd reports to."""
+    if not args.radius_listen:
+        return None
+    if not args.radius_server or not args.radius_secret_file:
+        sys.exit("--radius-listen needs --radius-server and "
+                 "--radius-secret-file")
+    sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+    import l2tvpp_acct
+    with open(args.radius_secret_file, "rb") as f:
+        secret = f.read().strip()
+    acct = l2tvpp_acct.AcctSessions(sync.session_counters)
+    relay = l2tvpp_acct.RadiusRelay(
+        args.radius_listen,
+        {"auth": args.radius_auth_port, "acct": args.radius_acct_port},
+        [l2tvpp_acct.parse_server(x) for x in args.radius_server],
+        secret, acct.counters,
+        source=args.radius_source, device=args.radius_device)
+    relay.start()
+    log.info("RADIUS relay on %s (auth %d, acct %d) -> %s: accounting "
+             "counters come from VPP", args.radius_listen,
+             args.radius_auth_port, args.radius_acct_port,
+             ", ".join(args.radius_server))
+    return acct
+
+
+def run_daemon(args):
+    interval = args.interval
+    api_lock = threading.Lock()
     vpp = connect_vpp_retry(interval)
-    sync = Syncd(vpp.api, local_ip, local_port, state_path)   # see run_once
+    sync = Syncd(LockedApi(vpp.api, api_lock), args.local_ip,
+                 args.local_port, args.state, urpf=args.urpf)  # see run_once
+    sync.acct = start_radius_relay(args, sync)
+    if sync.acct:
+        for key, rec in sync.installed.items():
+            sync.acct.installed(key, rec.get("ifname"), rec["sw_if_index"],
+                                rec.get("ifindex"))
     wake = {"now": False}
     signal.signal(signal.SIGHUP, lambda *_: wake.__setitem__("now", True))
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     log.info("l2tvppd up: reconcile every %ds (SIGHUP to poke), local-ip "
-             "auto per tunnel%s", interval,
-             "" if local_ip is None else " (fallback %s)" % local_ip)
+             "auto per tunnel%s, urpf %s", interval,
+             "" if args.local_ip is None else " (fallback %s)" % args.local_ip,
+             args.urpf)
     try:
         # reconcile UNCONDITIONALLY each iteration - this is the interval
         # safety net; SIGHUP only cuts the sleep short. (Gating the pass on
@@ -545,7 +909,7 @@ def run_daemon(local_ip, local_port, interval, state_path):
                 # restarted: this client is then dead for good and VPP is
                 # empty, so get a fresh connection and re-check our record
                 try:
-                    vpp.api.control_ping()
+                    sync.vpp.control_ping()
                 except Exception:
                     log.warning("VPP API connection lost; reconnecting")
                     try:
@@ -553,8 +917,10 @@ def run_daemon(local_ip, local_port, interval, state_path):
                     except Exception:
                         pass
                     vpp = connect_vpp_retry(interval)
-                    sync.vpp = vpp.api
+                    sync.vpp = LockedApi(vpp.api, api_lock)
                     sync.verify_state = True
+                    sync.urpf_missing = False
+                    sync.punt4 = None
             for _ in range(interval):
                 if wake["now"]:
                     break
@@ -575,15 +941,39 @@ def main():
                    help="daemon safety-net reconcile interval (s)")
     p.add_argument("--state", default="/run/l2tvppd.json",
                    help="path to the installed-session state file")
+    p.add_argument("--urpf", choices=["strict", "loose", "off"],
+                   default="strict",
+                   help="source validation on the session interfaces "
+                        "(VPP urpf plugin); default strict")
+    g = p.add_argument_group(
+        "accounting relay (daemon mode; see l2tvpp_acct.py)")
+    g.add_argument("--radius-listen", default=None, metavar="IP",
+                   help="address accel-ppp sends its RADIUS traffic to, "
+                        "usually 127.0.0.1; enables the relay")
+    g.add_argument("--radius-auth-port", type=int, default=1812)
+    g.add_argument("--radius-acct-port", type=int, default=1813)
+    g.add_argument("--radius-server", action="append", default=[],
+                   metavar="HOST[:AUTHPORT[:ACCTPORT]]",
+                   help="real RADIUS server; repeat for fallbacks")
+    g.add_argument("--radius-secret-file", default=None, metavar="PATH",
+                   help="file with the RADIUS shared secret (the one "
+                        "accel-ppp uses towards the relay and the server "
+                        "expects from this NAS)")
+    g.add_argument("--radius-source", default=None, metavar="IP",
+                   help="source address towards the RADIUS server (the NAS "
+                        "address it knows)")
+    g.add_argument("--radius-device", default=None, metavar="DEV",
+                   help="bind the upstream sockets to this interface or VRF "
+                        "device")
     p.add_argument("--verbose", "-v", action="store_true")
     args = p.parse_args()
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s l2tvppd %(levelname)s %(message)s")
     if args.mode == "reconcile":
-        run_once(args.local_ip, args.local_port, args.state)
+        run_once(args)
     else:
-        run_daemon(args.local_ip, args.local_port, args.interval, args.state)
+        run_daemon(args)
 
 
 if __name__ == "__main__":

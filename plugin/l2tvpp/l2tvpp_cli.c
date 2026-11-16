@@ -186,6 +186,69 @@ VLIB_CLI_COMMAND (l2tvpp_route_command, static) = {
 };
 
 static clib_error_t *
+l2tvpp_punt_address_cli (vlib_main_t * vm, unformat_input_t * input,
+			 vlib_cli_command_t * cmd)
+{
+  l2tvpp_main_t *lm = &l2tvpp_main;
+  unformat_input_t _line, *line = &_line;
+  ip46_address_t addr = { 0 };
+  u8 is_add = 1, have = 0;
+  int rv;
+
+  if (!unformat_user (input, unformat_line_input, line))
+    return 0;
+
+  while (unformat_check_input (line) != UNFORMAT_END_OF_INPUT)
+    {
+      if (unformat (line, "del"))
+	is_add = 0;
+      else if (unformat (line, "%U", unformat_ip4_address, &addr.ip4))
+	have = 1;
+      else
+	{
+	  unformat_free (line);
+	  return clib_error_return (0, "unknown input `%U'",
+				    format_unformat_error, line);
+	}
+    }
+  unformat_free (line);
+
+  if (!have)
+    return clib_error_return (0, "IPv4 address required");
+  rv = l2tvpp_punt_address_add_del (lm, &addr, is_add);
+  if (rv)
+    return clib_error_return (0, "l2tvpp_punt_address_add_del returned %d",
+			      rv);
+  return 0;
+}
+
+VLIB_CLI_COMMAND (l2tvpp_punt_address_command, static) = {
+  .path = "l2tvpp punt-address",
+  .short_help = "l2tvpp punt-address [del] <ip4>",
+  .function = l2tvpp_punt_address_cli,
+};
+
+static clib_error_t *
+show_l2tvpp_punt_address_cli (vlib_main_t * vm, unformat_input_t * input,
+			      vlib_cli_command_t * cmd)
+{
+  l2tvpp_main_t *lm = &l2tvpp_main;
+  u32 *a;
+
+  if (vec_len (lm->punt_ip4s) == 0)
+    vlib_cli_output (vm, "no l2tvpp punt addresses");
+  vec_foreach (a, lm->punt_ip4s)
+    vlib_cli_output (vm, "%U", format_ip4_address, a);
+  return 0;
+}
+
+VLIB_CLI_COMMAND (show_l2tvpp_punt_address_command, static) = {
+  .path = "show l2tvpp punt-address",
+  .short_help = "show l2tvpp punt-address",
+  .function = show_l2tvpp_punt_address_cli,
+};
+
+static clib_error_t *
 show_l2tvpp_tunnel_cli (vlib_main_t * vm, unformat_input_t * input,
 			vlib_cli_command_t * cmd)
 {

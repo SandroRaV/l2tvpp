@@ -44,6 +44,8 @@ fi
   cp /src/test/test_l2tvpp.py /src/test/test_l2tvpp_syncd.py test/
   echo "== parser unit test (no VPP)"
   python3 /src/syncd/test_parse.py
+  echo "== accounting relay unit test (no VPP)"
+  python3 /src/syncd/test_acct.py
   echo "== build (incremental, plugin only)"
   make build
   echo "== checkstyle (plugin C only; non-fatal)"

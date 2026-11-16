@@ -249,6 +249,70 @@ milestone, so encap always writes `FF 03 00 21`.
   caring.
 - MPPE, multilink, compression: punted, which means effectively unsupported
   at speed. Out of scope.
+- IPv6 to a link-local or multicast destination (router solicitations,
+  neighbour discovery, DHCPv6): accel-ppp answers these on the kernel
+  session netdev, so `l2tvpp-input` punts them like LCP. Without that a
+  subscriber gets no answer to a router solicitation and no DHCPv6 lease.
+- IPv4 to the LNS's own address on the session netdevs (accel-ppp's
+  `gw-ip-address`): VPP does not own that address. The daemon registers it
+  (`l2tvpp_punt_address_add_del`), `l2tvpp-input` punts packets for it, and
+  the kernel answers. Without that a subscriber cannot ping its gateway.
+  The LNS's global IPv6 address inside a subscriber's /64 is not covered
+  (one per session; the link-local address is).
+
+### 5a. What is carried over from the kernel session netdev
+
+accel-ppp applies what RADIUS and LCP decided to the kernel netdev of the
+session. With l2tvpp that netdev no longer carries the data traffic, so
+`l2tvppd` reads these settings off the netdev on every pass and puts them on
+the VPP session interface:
+
+| On the kernel netdev | On the VPP session interface | Without it |
+|---|---|---|
+| master = a VRF (`Accel-VRF-Name` in the RADIUS reply, or a CoA) | bound to the VPP table with the VRF's table id (IPv4 and IPv6), subscriber routes in that table | the subscriber is forwarded in the default table |
+| MTU (negotiated MRU, `Framed-MTU`) | L3 MTU | VPP never fragments or answers "fragmentation needed" at the subscriber's MTU |
+| (source validation is a kernel sysctl or firewall rule) | strict uRPF, VPP `urpf` plugin, `--urpf` | a subscriber can send from any source address |
+
+Details that matter:
+
+- A session whose VRF table VPP does not have gets the table created; a
+  session that cannot be bound to its table is taken out of VPP again and
+  stays on the kernel path. It never forwards in the default table.
+- The routes are read before the links in each pass: accel-ppp enslaves the
+  netdev before it adds addresses, so a route that is seen always comes
+  with its VRF.
+- On a table change the daemon removes the session's routes, rebinds the
+  interface and adds them again. The plugin remembers the FIB each route
+  went into, so a delete or a session delete finds it wherever it is.
+- The encap fast path looks a destination up by address alone on an uplink
+  in the default table: only subscribers of the default table are in its
+  cache.
+- uRPF is applied with `urpf_update_v2` and no table id: the check then
+  uses the table the interface is bound to and follows a rebind. The older
+  `urpf_update` pins the check to the default table and drops everything a
+  session in a VRF sends.
+- Strict uRPF also closes the window between "netdev exists" and "address
+  assigned": a session without a route forwards nothing.
+- The tunnel itself (the outer packet towards the LAC) stays in the
+  default table.
+
+### 5b. Accounting
+
+accel-ppp fills `Acct-Input/Output-Octets` and `-Packets` from the netdev
+statistics (`RTM_GETLINK`) and has no hook to take them from elsewhere
+(the session hooks of accel-ppp-ng cover interface creation, addresses,
+routes and the limiter, not statistics). `syncd/l2tvpp_acct.py` therefore
+corrects the numbers on the way to the RADIUS server: accel-ppp sends its
+RADIUS traffic to a relay inside `l2tvppd` on the LNS, the relay adds the
+counters of the VPP session interface to interim and stop records,
+recomputes the authenticators and forwards to the real server. Everything
+else passes unchanged. A record is matched to its VPP session through the
+kernel interface index of the netdev named in `NAS-Port-Id`; a netdev name
+is reused by the next session, an interface index is not.
+
+Not covered: accel-ppp's own view (`accel-cmd show sessions` counters,
+`Idle-Timeout`, traffic quotas) still sees the kernel netdev only. Do not
+send `Idle-Timeout` to an l2tvpp LNS: accel-ppp would close busy sessions.
 
 ## 6. Milestones
 
@@ -284,8 +348,8 @@ offload vpp` or similar).
   infrastructure.
 - accel-ppp's kernel `pppN` keeps receiving nothing once VPP owns the data
   path, so accel-ppp idle-timeout or traffic-based accounting would see
-  zero traffic. Accounting counters must come from VPP (M2: daemon pushes
-  session counters into accel-ppp or RADIUS interim directly).
+  zero traffic. RADIUS accounting is solved by the relay of step 5b;
+  idle-timeout is not.
 - Per-session interfaces: VPP handles tens of thousands, but interface
   creation is not free; measure setup rate in M2.
 - UDP checksum: LACs may send outer UDP checksum 0 for IPv4; accept both.

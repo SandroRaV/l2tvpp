@@ -40,6 +40,5 @@ fine; the daemon coalesces bursts (one reconcile per wake).
 
 Accounting note: once VPP owns the data path, the kernel `pppN` sees no
 traffic, so accel-ppp's traffic-based accounting and idle timeout read zero.
-Feed counters from `l2tvpp_session_dump` (rx/tx packets/bytes per session)
-into RADIUS interim accounting instead. That is an M2/M3 follow-up, not done
-here.
+RADIUS accounting gets the VPP counters through the relay in `l2tvppd`
+(`README.md`, "Accounting"); the idle timeout does not, so do not use it.

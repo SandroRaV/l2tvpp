@@ -104,12 +104,18 @@ l2tvpp_build_rewrite_i (l2tvpp_session_t * sess, vnet_link_t link_type)
   ip->flags_and_fragment_offset = 0;	/* DF clear on purpose */
   ip->ttl = 64;
   ip->protocol = IP_PROTOCOL_UDP;
-  ip->checksum = 0;		/* fixup */
+  ip->checksum = 0;
   ip->src_address.as_u32 = t->local_ip.ip4.as_u32;
   ip->dst_address.as_u32 = t->peer_ip.ip4.as_u32;
-  /* header is complete except length (0 here); cache its checksum so the
-   * per-packet fixup only folds in the length delta */
-  sess->encap_ip_csum0 = ip4_header_checksum (ip);
+  /* The header is complete except for the length (0 here). Its checksum
+   * goes into the rewrite itself, so every encapsulated packet starts out
+   * with it and the fixup only folds in the length delta. It used to be
+   * kept in the session and read through a session pointer handed to the
+   * fixup - a pointer into the session pool, which moves when the pool
+   * grows: the first sessions then got a wrong outer checksum as soon as
+   * the freed memory was reused, and the LAC dropped everything VPP sent
+   * them (VM rig, 2026-11-16, second session on a fresh LNS). */
+  ip->checksum = ip4_header_checksum (ip);
 
   udp = (udp_header_t *) (ip + 1);
   udp->src_port = clib_host_to_net_u16 (t->local_port);
@@ -144,7 +150,6 @@ static void
 l2tvpp_fixup (vlib_main_t * vm, const ip_adjacency_t * adj,
 	      vlib_buffer_t * b, const void *data)
 {
-  const l2tvpp_session_t *sess = data;
   ip4_header_t *ip = vlib_buffer_get_current (b);
   udp_header_t *udp = (udp_header_t *) (ip + 1);
   u16 len = vlib_buffer_length_in_chain (vm, b);
@@ -155,9 +160,11 @@ l2tvpp_fixup (vlib_main_t * vm, const ip_adjacency_t * adj,
    * TTL-decrement it */
   b->flags |= VNET_BUFFER_F_LOCALLY_ORIGINATED;
   ip->length = iplen;
-  /* incremental: only the length field changed (0 -> iplen) on a header
-   * whose length=0 checksum is cached; avoids the full 20-byte recompute */
-  sum = sess->encap_ip_csum0;
+  /* incremental: the rewrite carries the checksum of the header with
+   * length 0 (l2tvpp_build_rewrite_i), only the length field changed
+   * (0 -> iplen); avoids the full 20-byte recompute and needs nothing from
+   * the session */
+  sum = ip->checksum;
   sum = ip_csum_update (sum, 0, iplen, ip4_header_t, length);
   ip->checksum = ip_csum_fold (sum);
   udp->length = clib_host_to_net_u16 (len - sizeof (*ip));
@@ -183,7 +190,7 @@ l2tvpp_update_adj (vnet_main_t * vnm, u32 sw_if_index, adj_index_t ai)
   if (!rw)
     return;
 
-  adj_nbr_midchain_update_rewrite (ai, l2tvpp_fixup, sess,
+  adj_nbr_midchain_update_rewrite (ai, l2tvpp_fixup, 0,
 				   ADJ_FLAG_MIDCHAIN_IP_STACK, rw);
 
   fib_prefix_t pfx = {
@@ -384,6 +391,7 @@ l2tvpp_session_add_del (l2tvpp_main_t * lm, u32 tunnel_index,
 	vec_set_len (sess->routes, n - 1);
     }
   vec_free (sess->routes);
+  vec_free (sess->route_fib_indices);
   l2tvpp_encap_adj_flush_session (lm, sess);
   ip4_sw_interface_enable_disable (sess->sw_if_index, 0);
   ip6_sw_interface_enable_disable (sess->sw_if_index, 0);
@@ -523,12 +531,17 @@ l2tvpp_encap_adj_flush_session (l2tvpp_main_t * lm, l2tvpp_session_t * sess)
   vec_free (sess->encap_ip4s);
 }
 
-int
-l2tvpp_route_add_del (l2tvpp_main_t * lm, const fib_prefix_t * pfx,
-		      u32 sw_if_index, u8 is_add)
+/* add or remove the path "pfx via the session interface" in one FIB. Every
+ * call builds its own path: fib_table_entry_path_add2/remove2 rewrite the
+ * path they are given (the host-prefix fixup sets the next hop and the
+ * attached flag, a second pass over the same path adds the glean flag), so
+ * a path that went through a remove no longer equals the one a later add
+ * would install - and the route installed with it cannot be removed with a
+ * fresh path afterwards (make test, session moved between tables). */
+static void
+l2tvpp_route_fib (l2tvpp_main_t * lm, u32 fib_index, const fib_prefix_t * pfx,
+		  u32 sw_if_index, u8 is_add)
 {
-  l2tvpp_session_t *sess;
-  u32 fib_index, i;
   /* path_add2/remove2 take a vppinfra vector of paths, not a bare
    * pointer - vec_len on a stack struct crashes */
   fib_route_path_t *rpaths = NULL, path = {
@@ -537,23 +550,8 @@ l2tvpp_route_add_del (l2tvpp_main_t * lm, const fib_prefix_t * pfx,
     .frp_weight = 1,
   };
 
-  sess = l2tvpp_session_by_sw_if_index (lm, sw_if_index);
-  if (!sess)
-    return VNET_API_ERROR_INVALID_SW_IF_INDEX;
-
-  /* remember what is routed at the session (see l2tvpp_session_t.routes) */
-  vec_foreach_index (i, sess->routes)
-    if (!fib_prefix_cmp (&sess->routes[i], pfx))
-      break;
-  if (is_add && i == vec_len (sess->routes))
-    vec_add1 (sess->routes, *pfx);
-  else if (!is_add && i < vec_len (sess->routes))
-    vec_del1 (sess->routes, i);
-
   path.frp_proto = fib_proto_to_dpo (pfx->fp_proto);
   vec_add1 (rpaths, path);
-  fib_index = fib_table_get_index_for_sw_if_index (pfx->fp_proto,
-						   sw_if_index);
   /* entry flags must stay NONE: any other flag makes fib_entry_src_api_add
    * materialize the new source as a special drop path-list first, and the
    * real path then MERGES with that phantom drop instead of replacing it -
@@ -565,8 +563,92 @@ l2tvpp_route_add_del (l2tvpp_main_t * lm, const fib_prefix_t * pfx,
 			       FIB_ENTRY_FLAG_NONE, rpaths);
   else
     fib_table_entry_path_remove2 (fib_index, pfx, lm->fib_src, rpaths);
-  l2tvpp_encap_adj_add_del (lm, pfx, sw_if_index, is_add);
   vec_free (rpaths);
+}
+
+int
+l2tvpp_route_add_del (l2tvpp_main_t * lm, const fib_prefix_t * pfx,
+		      u32 sw_if_index, u8 is_add)
+{
+  l2tvpp_session_t *sess;
+  u32 fib_index, i;
+  u8 known;
+
+  sess = l2tvpp_session_by_sw_if_index (lm, sw_if_index);
+  if (!sess)
+    return VNET_API_ERROR_INVALID_SW_IF_INDEX;
+
+  /* the table the session interface is bound to: the default one, or the
+   * VRF accel-ppp put the session into */
+  fib_index = fib_table_get_index_for_sw_if_index (pfx->fp_proto,
+						   sw_if_index);
+
+  /* what is routed at the session and in which FIB (see
+   * l2tvpp_session_t.routes / route_fib_indices) */
+  vec_foreach_index (i, sess->routes)
+    if (!fib_prefix_cmp (&sess->routes[i], pfx))
+      break;
+  known = i < vec_len (sess->routes);
+
+  if (known && (!is_add || sess->route_fib_indices[i] != fib_index))
+    {
+      /* a delete, or an add after the interface moved to another table:
+       * take the route out of the FIB it was installed in */
+      l2tvpp_route_fib (lm, sess->route_fib_indices[i], pfx, sw_if_index, 0);
+      l2tvpp_encap_adj_add_del (lm, pfx, sw_if_index, 0);
+      vec_del1 (sess->routes, i);
+      vec_del1 (sess->route_fib_indices, i);
+      known = 0;
+    }
+  else if (!known && !is_add)
+    {
+      /* not ours on record: removing a path that is not there is a no-op */
+      l2tvpp_route_fib (lm, fib_index, pfx, sw_if_index, 0);
+      l2tvpp_encap_adj_add_del (lm, pfx, sw_if_index, 0);
+    }
+
+  if (is_add)
+    {
+      if (!known)
+	{
+	  vec_add1 (sess->routes, *pfx);
+	  vec_add1 (sess->route_fib_indices, fib_index);
+	}
+      l2tvpp_route_fib (lm, fib_index, pfx, sw_if_index, 1);
+      /* the encap fast path looks a destination up by address alone, on an
+       * uplink in the default table: only subscribers of the default table
+       * (FIB index 0) may be in its cache, or a packet for the same address
+       * in another VRF would be sent into this session */
+      if (fib_index == 0)
+	l2tvpp_encap_adj_add_del (lm, pfx, sw_if_index, 1);
+    }
+  return 0;
+}
+
+/* --------------------------------------------------------------------
+ * addresses of the LNS itself inside the sessions (see l2tvpp_main_t)
+ */
+int
+l2tvpp_punt_address_add_del (l2tvpp_main_t * lm, const ip46_address_t * addr,
+			     u8 is_add)
+{
+  u32 i, ip4;
+
+  if (!ip46_address_is_ip4 (addr))
+    return VNET_API_ERROR_UNIMPLEMENTED;
+  ip4 = addr->ip4.as_u32;
+  vec_foreach_index (i, lm->punt_ip4s)
+    if (lm->punt_ip4s[i] == ip4)
+      break;
+  if (is_add)
+    {
+      if (i == vec_len (lm->punt_ip4s))
+	vec_add1 (lm->punt_ip4s, ip4);
+      return 0;
+    }
+  if (i == vec_len (lm->punt_ip4s))
+    return VNET_API_ERROR_NO_SUCH_ENTRY;
+  vec_del1 (lm->punt_ip4s, i);
   return 0;
 }
 

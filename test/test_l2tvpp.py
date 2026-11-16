@@ -15,7 +15,8 @@ import unittest
 from framework import VppTestCase
 from asfframework import VppTestRunner
 from scapy.layers.l2 import Ether
-from scapy.layers.inet import IP, UDP
+from scapy.layers.inet import IP, UDP, ICMP
+from scapy.layers.inet6 import IPv6, ICMPv6ND_RS, ICMPv6EchoRequest
 from scapy.layers.l2tp import L2TP
 from scapy.layers.ppp import PPP, HDLC
 from scapy.packet import Raw
@@ -274,6 +275,68 @@ class TestL2tvpp(VppTestCase):
             if "l2tvpp-input" in line and reason in line:
                 total += int(line.split()[0])
         return total
+
+    def test_lns_address_is_punted(self):
+        """a packet from the subscriber to the LNS's own address on the
+        kernel session netdev (a ping to its gateway) is handed to the
+        kernel like LCP; everything else is routed as before"""
+        gw = "10.200.0.1"
+        reason = "for the LNS itself, punted"
+        self.vapi.l2tvpp_punt_address_add_del(is_add=True, address=gw)
+        # adding it again is not an error
+        self.vapi.l2tvpp_punt_address_add_del(is_add=True, address=gw)
+        try:
+            self.assertEqual(
+                [str(d.address)
+                 for d in self.vapi.l2tvpp_punt_address_dump()], [gw])
+            before = self.l2tvpp_input_error(reason)
+            to_gw = IP(src=SUB_IP, dst=gw) / ICMP()
+            other = IP(src=SUB_IP, dst=self.core.remote_ip4) / UDP()
+            self.pg_enable_capture(self.pg_interfaces)
+            self.lac.add_stream([self.l2tp_data(to_gw)] * 3
+                                + [self.l2tp_data(other)] * 2)
+            self.pg_start()
+            self.core.get_capture(2)
+            self.assertEqual(self.l2tvpp_input_error(reason), before + 3)
+        finally:
+            self.vapi.l2tvpp_punt_address_add_del(is_add=False, address=gw)
+        self.assertEqual(len(self.vapi.l2tvpp_punt_address_dump()), 0)
+        # without the registration the plugin decapsulates it
+        before = self.l2tvpp_input_error(reason)
+        self.pg_enable_capture(self.pg_interfaces)
+        self.lac.add_stream([self.l2tp_data(to_gw)] * 3)
+        self.pg_start()
+        self.assertEqual(self.l2tvpp_input_error(reason), before)
+
+    def test_ip6_link_local_and_multicast_are_punted(self):
+        """router solicitations, neighbour discovery and DHCPv6 from the
+        subscriber are for accel-ppp on the kernel netdev: IPv6 to a
+        multicast or link-local destination is punted like LCP, IPv6 to a
+        global destination is decapsulated"""
+        reason = "IPv6 link-local/multicast, punted"
+        punted = self.l2tvpp_input_error(reason)
+        decap = self.l2tvpp_input_error("decapsulated")
+
+        def l2tp6(inner):
+            return (Ether(src=self.lac.remote_mac, dst=self.lac.local_mac)
+                    / IP(src=self.lac.remote_ip4, dst=self.lac.local_ip4)
+                    / UDP(sport=L2TP_PORT, dport=L2TP_PORT)
+                    / L2TP(hdr="", tunnel_id=LOCAL_TID, session_id=LOCAL_SID)
+                    / HDLC() / PPP(proto=0x0057) / inner)
+
+        pkts = [
+            l2tp6(IPv6(src="fe80::2", dst="ff02::2") / ICMPv6ND_RS()),
+            l2tp6(IPv6(src="fe80::2", dst="ff02::1:2")
+                  / UDP(sport=546, dport=547) / Raw(b"\x01" * 20)),
+            l2tp6(IPv6(src="fe80::2", dst="fe80::1") / ICMPv6EchoRequest()),
+            l2tp6(IPv6(src="2001:db8::2", dst="2001:db8:ffff::1")
+                  / ICMPv6EchoRequest()),
+        ]
+        self.pg_enable_capture(self.pg_interfaces)
+        self.lac.add_stream(pkts)
+        self.pg_start()
+        self.assertEqual(self.l2tvpp_input_error(reason), punted + 3)
+        self.assertEqual(self.l2tvpp_input_error("decapsulated"), decap + 1)
 
     def test_counters_climb_when_forwarding(self):
         """punt/decap counters must not depend on error-drop seeing the
@@ -548,6 +611,317 @@ class TestL2tvppEncapFastpath(VppTestCase):
 
 if __name__ == "__main__":
     unittest.main(testRunner=VppTestRunner)
+
+
+class TestL2tvppParity(VppTestCase):
+    """what accel-ppp sets on the kernel netdev works on the VPP session
+    interface: VRF, MTU, source validation; and the interface counters mean
+    what the accounting relay takes them for"""
+
+    VRF = 10
+    OVERHEAD = 38       # outer IPv4 20 + UDP 8 + L2TP 6 + PPP 4
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.create_pg_interfaces(range(3))
+        cls.vapi.ip_table_add_del(is_add=True, table={"table_id": cls.VRF})
+        cls.vapi.ip_table_add_del(
+            is_add=True, table={"table_id": cls.VRF, "is_ip6": True})
+        cls.pg2.set_table_ip4(cls.VRF)
+        for i in cls.pg_interfaces:
+            i.admin_up()
+            i.config_ip4()
+            i.resolve_arp()
+        cls.lac, cls.core, cls.vrf_core = cls.pg0, cls.pg1, cls.pg2
+        cls.vapi.ip_neighbor_add_del(
+            cls.pg0.sw_if_index, cls.pg0.remote_mac, cls.pg0.remote_ip4,
+            is_add=1, flags=1)
+        cls.tunnel = cls.vapi.l2tvpp_tunnel_add_del(
+            is_add=True, local_ip=cls.pg0.local_ip4, peer_ip=cls.pg0.remote_ip4,
+            local_port=L2TP_PORT, peer_port=L2TP_PORT,
+            local_tid=LOCAL_TID, peer_tid=PEER_TID).tunnel_index
+
+    def setUp(self):
+        super().setUp()
+        self.sessions = []
+
+    def tearDown(self):
+        for lsid, psid, swif in self.sessions:
+            for af in (0, 1):
+                self.vapi.urpf_update_v2(is_input=True, mode=0, af=af,
+                                         sw_if_index=swif)
+            self.vapi.l2tvpp_session_add_del(
+                is_add=False, tunnel_index=self.tunnel, local_sid=lsid,
+                peer_sid=psid)
+        super().tearDown()
+
+    def add_session(self, lsid, psid, table=0):
+        swif = self.vapi.l2tvpp_session_add_del(
+            is_add=True, tunnel_index=self.tunnel, local_sid=lsid,
+            peer_sid=psid, acfc=False, pfc=False).sw_if_index
+        self.sessions.append((lsid, psid, swif))
+        if table:
+            self.set_table(swif, table)
+        return swif
+
+    def set_table(self, swif, table):
+        for v6 in (False, True):
+            self.vapi.sw_interface_set_table(
+                sw_if_index=swif, is_ipv6=v6, vrf_id=table)
+
+    def route(self, sub, swif, is_add=True):
+        self.vapi.l2tvpp_route_add_del(
+            is_add=is_add, prefix=sub + "/32", sw_if_index=swif)
+
+    def in_fib(self, table, sub):
+        """the subscriber /32 is in this table and leaves by a session"""
+        out = self.vapi.cli("show ip fib table %d %s/32" % (table, sub))
+        return ("%s/32" % sub) in out and "l2tvpp" in out
+
+    def upstream(self, lsid, src, dst, n=1):
+        inner = IP(src=src, dst=dst) / UDP(sport=1234, dport=5678) / Raw(b"x" * 64)
+        return [Ether(src=self.lac.remote_mac, dst=self.lac.local_mac)
+                / IP(src=self.lac.remote_ip4, dst=self.lac.local_ip4)
+                / UDP(sport=L2TP_PORT, dport=L2TP_PORT)
+                / L2TP(hdr="", tunnel_id=LOCAL_TID, session_id=lsid)
+                / HDLC() / PPP(proto=0x0021) / inner] * n
+
+    def downstream(self, pg, dst, n=1, size=64, df=False):
+        return [Ether(src=pg.remote_mac, dst=pg.local_mac)
+                / IP(src=pg.remote_ip4, dst=dst, flags="DF" if df else 0)
+                / UDP(sport=5678, dport=1234) / Raw(b"x" * (size - 28))] * n
+
+    def counters(self, swif):
+        d = self.vapi.l2tvpp_session_dump(sw_if_index=swif)[0]
+        return d.rx_packets, d.rx_bytes, d.tx_packets, d.tx_bytes
+
+    def test_session_in_a_vrf(self):
+        """a session interface bound to a VRF table: its route is in that
+        table only, and it forwards to and from that VRF only"""
+        sub = "10.201.0.5"
+        swif = self.add_session(1001, 2001, table=self.VRF)
+        self.route(sub, swif)
+        self.assertTrue(self.in_fib(self.VRF, sub))
+        self.assertFalse(self.in_fib(0, sub))
+
+        # subscriber -> VRF uplink
+        rx = self.send_and_expect(
+            self.lac, self.upstream(1001, sub, self.vrf_core.remote_ip4, 5),
+            self.vrf_core)
+        for r in rx:
+            self.assertEqual(r[IP].src, sub)
+        # VRF uplink -> subscriber: encapsulated towards the LAC, which is
+        # reached in the default table
+        rx = self.send_and_expect(
+            self.vrf_core, self.downstream(self.vrf_core, sub, 5), self.lac)
+        for r in rx:
+            self.assertEqual(r[L2TP].session_id, 2001)
+            self.assertEqual(r[PPP][IP].dst, sub)
+        # the default table knows nothing of this subscriber, in either
+        # direction
+        self.send_and_assert_no_replies(
+            self.core, self.downstream(self.core, sub, 5))
+        self.send_and_assert_no_replies(
+            self.lac, self.upstream(1001, sub, self.core.remote_ip4, 5))
+
+    def test_session_moves_between_tables(self):
+        """the interface is rebound while it has a route: the next add of
+        the route moves it, a session delete removes it wherever it is"""
+        sub = "10.201.0.6"
+        swif = self.add_session(1002, 2002)
+        self.route(sub, swif)
+        self.assertTrue(self.in_fib(0, sub))
+        self.set_table(swif, self.VRF)
+        self.route(sub, swif)
+        self.assertTrue(self.in_fib(self.VRF, sub))
+        self.assertFalse(self.in_fib(0, sub))
+        self.set_table(swif, 0)
+        self.route(sub, swif)
+        self.assertTrue(self.in_fib(0, sub))
+        self.assertFalse(self.in_fib(self.VRF, sub))
+        # rebind once more and delete the session without touching the
+        # route: it is removed from the table it was installed in
+        self.set_table(swif, self.VRF)
+        lsid, psid, _ = self.sessions.pop()
+        self.vapi.l2tvpp_session_add_del(
+            is_add=False, tunnel_index=self.tunnel, local_sid=lsid,
+            peer_sid=psid)
+        self.assertFalse(self.in_fib(0, sub))
+        self.assertFalse(self.in_fib(self.VRF, sub))
+
+    def test_encap_fastpath_leaves_vrf_subscribers_alone(self):
+        """the fast path matches on the destination address alone: a
+        subscriber in a VRF must not be reachable through it from an uplink
+        in the default table"""
+        import re
+        sub = "10.201.0.7"
+        self.vapi.cli("l2tvpp encap-fastpath %s" % self.core.name)
+        try:
+            swif = self.add_session(1003, 2003, table=self.VRF)
+            self.route(sub, swif)
+            out = self.vapi.cli("show l2tvpp encap-fastpath")
+            self.assertEqual(int(re.search(
+                r"cached subscriber adjacencies: (\d+)", out).group(1)), 0)
+            self.send_and_assert_no_replies(
+                self.core, self.downstream(self.core, sub, 5))
+            # moved into the default table it is cached and reachable
+            self.set_table(swif, 0)
+            self.route(sub, swif)
+            out = self.vapi.cli("show l2tvpp encap-fastpath")
+            self.assertEqual(int(re.search(
+                r"cached subscriber adjacencies: (\d+)", out).group(1)), 1)
+            self.send_and_expect(
+                self.core, self.downstream(self.core, sub, 5), self.lac)
+        finally:
+            self.vapi.cli("l2tvpp encap-fastpath %s disable" % self.core.name)
+
+    def test_mtu(self):
+        """the session interface's L3 MTU is the subscriber's: a larger
+        packet is fragmented, or answered with "fragmentation needed" if it
+        may not be"""
+        sub = "10.201.0.8"
+        swif = self.add_session(1004, 2004)
+        self.route(sub, swif)
+        self.vapi.sw_interface_set_mtu(sw_if_index=swif, mtu=[1400, 0, 0, 0])
+
+        # fits
+        rx = self.send_and_expect(
+            self.core, self.downstream(self.core, sub, 1, size=1400, df=True),
+            self.lac)
+        self.assertEqual(len(rx[0][PPP][IP]), 1400)
+        # too big, DF: ICMP back to the sender with the session's MTU
+        rx = self.send_and_expect(
+            self.core, self.downstream(self.core, sub, 1, size=1500, df=True),
+            self.core)
+        self.assertEqual(rx[0][ICMP].type, 3)
+        self.assertEqual(rx[0][ICMP].code, 4)
+        self.assertEqual(rx[0][ICMP].nexthopmtu, 1400)
+        # too big, no DF: two fragments, each inside the MTU, each in L2TP
+        self.pg_enable_capture(self.pg_interfaces)
+        self.core.add_stream(self.downstream(self.core, sub, 1, size=1500))
+        self.pg_start()
+        rx = self.lac.get_capture(2)
+        for r in rx:
+            self.assertEqual(r[L2TP].session_id, 2004)
+            self.assertLessEqual(len(r[PPP][IP]), 1400)
+        self.assertEqual(sum(len(r[PPP][IP]) - 20 for r in rx), 1480)
+
+    def test_urpf_strict(self):
+        """VPP's urpf plugin on the session interface: the subscriber can
+        send from what is routed at its session and from nothing else"""
+        sub = "10.201.0.9"
+        swif = self.add_session(1005, 2005)
+        self.route(sub, swif)
+        self.vapi.urpf_update_v2(is_input=True, mode=2, af=0,
+                                 sw_if_index=swif)
+        self.send_and_expect(
+            self.lac, self.upstream(1005, sub, self.core.remote_ip4, 5),
+            self.core)
+        # somebody else's address, and an address behind the uplink
+        self.send_and_assert_no_replies(
+            self.lac, self.upstream(1005, "10.201.0.99",
+                                    self.core.remote_ip4, 5))
+        self.send_and_assert_no_replies(
+            self.lac, self.upstream(1005, "192.0.2.1",
+                                    self.core.remote_ip4, 5))
+        # a session without a route (address not assigned yet) forwards
+        # nothing
+        other = self.add_session(1006, 2006)
+        self.vapi.urpf_update_v2(is_input=True, mode=2, af=0,
+                                 sw_if_index=other)
+        self.send_and_assert_no_replies(
+            self.lac, self.upstream(1006, sub, self.core.remote_ip4, 5))
+
+    def test_urpf_strict_follows_the_session_into_a_vrf(self):
+        """urpf_update_v2 without a table checks against the table the
+        interface is bound to, also after a rebind (urpf_update, the old
+        call, pins it to the default table: l2tvppd must not use it)"""
+        sub = "10.201.0.12"
+        swif = self.add_session(1010, 2010)
+        self.vapi.urpf_update_v2(is_input=True, mode=2, af=0,
+                                 sw_if_index=swif)
+        self.set_table(swif, self.VRF)
+        self.route(sub, swif)
+        self.send_and_expect(
+            self.lac, self.upstream(1010, sub, self.vrf_core.remote_ip4, 5),
+            self.vrf_core)
+        self.send_and_assert_no_replies(
+            self.lac, self.upstream(1010, "10.201.0.99",
+                                    self.vrf_core.remote_ip4, 5))
+
+    def test_outer_checksum_survives_session_pool_growth(self):
+        """the outer IPv4 header VPP writes for a session keeps a valid
+        checksum when more sessions are added (the session pool is
+        reallocated) and earlier ones are deleted (the memory is reused)"""
+        def check(swif_sub):
+            for lsid, psid, sub in swif_sub:
+                rx = self.send_and_expect(
+                    self.core, self.downstream(self.core, sub, 3, size=200),
+                    self.lac)
+                for r in rx:
+                    self.assertEqual(r[L2TP].session_id, psid)
+                    outer = r[IP].copy()
+                    want = outer.chksum
+                    del outer.chksum
+                    self.assertEqual(IP(bytes(outer)).chksum, want)
+
+        first = []
+        for n in range(3):
+            sub = "10.201.1.%d" % (n + 1)
+            self.route(sub, self.add_session(3000 + n, 4000 + n))
+            first.append((3000 + n, 4000 + n, sub))
+        check(first)
+        more = []
+        for n in range(3, 200):
+            sub = "10.201.%d.%d" % (1 + n // 250, 1 + n % 250)
+            self.route(sub, self.add_session(3000 + n, 4000 + n))
+            more.append((3000 + n, 4000 + n, sub))
+        check(first)
+        # delete every second later session and add others in their place
+        for lsid, psid, sub in more[::2]:
+            self.vapi.l2tvpp_session_add_del(
+                is_add=False, tunnel_index=self.tunnel, local_sid=lsid,
+                peer_sid=psid)
+            self.sessions = [x for x in self.sessions if x[0] != lsid]
+        for n in range(200, 300):
+            sub = "10.202.1.%d" % (n - 199)
+            self.route(sub, self.add_session(3000 + n, 4000 + n))
+        check(first + more[1::2][:20])
+
+    def test_counters_are_what_accounting_expects(self):
+        """RX counts the subscriber's IP packets, TX the encapsulated ones
+        (l2tvpp_acct.ENCAP_OVERHEAD is subtracted per packet)"""
+        sub = "10.201.0.10"
+        swif = self.add_session(1007, 2007)
+        self.route(sub, swif)
+        self.assertEqual(self.counters(swif), (0, 0, 0, 0))
+        up = self.upstream(1007, sub, self.core.remote_ip4, 10)
+        inner_len = len(up[0][PPP][IP])
+        self.send_and_expect(self.lac, up, self.core)
+        self.send_and_expect(
+            self.core, self.downstream(self.core, sub, 7, size=500), self.lac)
+        self.assertEqual(
+            self.counters(swif),
+            (10, 10 * inner_len, 7, 7 * (500 + self.OVERHEAD)))
+
+    def test_reused_interface_index_starts_at_zero(self):
+        """a new session that gets the interface index of a deleted one
+        does not inherit its counters"""
+        sub = "10.201.0.11"
+        swif = self.add_session(1008, 2008)
+        self.route(sub, swif)
+        self.send_and_expect(
+            self.lac, self.upstream(1008, sub, self.core.remote_ip4, 5),
+            self.core)
+        self.assertEqual(self.counters(swif)[0], 5)
+        lsid, psid, _ = self.sessions.pop()
+        self.vapi.l2tvpp_session_add_del(
+            is_add=False, tunnel_index=self.tunnel, local_sid=lsid,
+            peer_sid=psid)
+        again = self.add_session(1009, 2009)
+        self.assertEqual(again, swif)
+        self.assertEqual(self.counters(again), (0, 0, 0, 0))
 
 
 class TestL2tvppHandoff(VppTestCase):

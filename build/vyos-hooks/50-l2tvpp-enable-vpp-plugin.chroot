@@ -13,3 +13,10 @@ if [ -f "$TPL" ] && ! grep -q 'l2tvpp_plugin.so' "$TPL"; then
     sed -i '/plugin pppoe_plugin.so { enable }/a\    plugin l2tvpp_plugin.so { enable }' "$TPL"
     echo "I: l2tvpp: enabled l2tvpp_plugin.so in $TPL"
 fi
+# urpf_plugin.so: l2tvppd puts strict source validation on every session
+# interface with it (a subscriber may only send from what is routed at its
+# session). Without the plugin the daemon runs, but without that check.
+if [ -f "$TPL" ] && ! grep -q 'urpf_plugin.so' "$TPL"; then
+    sed -i '/plugin l2tvpp_plugin.so { enable }/a\    plugin urpf_plugin.so { enable }' "$TPL"
+    echo "I: l2tvpp: enabled urpf_plugin.so in $TPL"
+fi

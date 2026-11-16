@@ -68,7 +68,17 @@ vppctl show plugins | grep l2tvpp        # l2tvpp_plugin.so must be listed
 > `/usr/share/vyos/templates/vpp/startup.conf.j2` on every `vpp` commit, so
 > editing the template is what makes the enable stick; editing `vpp.conf`
 > directly only lasts until the next commit/reboot. The baked-ISO path (2)
-> does this for you via the build hook.
+> does this for you via the build hook. `vyos-configd` keeps the template
+> it has already loaded: after editing it on a running box,
+> `sudo systemctl restart vyos-configd` before the next `vpp` commit, or the
+> edit is not rendered (VM rig, 2026-11-16).
+>
+> The same goes for `urpf_plugin.so`, which `l2tvppd` uses for source
+> validation on the session interfaces: on an image built before the hook
+> enabled it, add `plugin urpf_plugin.so { enable }` below the l2tvpp line
+> of the template. When the plugin's API changed (a new `l2tvpp.api`), also
+> copy the new `l2tvpp.api.json` to `/usr/share/vpp/api/plugins/`, or
+> `l2tvppd` does not see the new calls.
 
 Lost on the next `add system image` upgrade - fine for iterating. For a
 persistent install use path 2.
@@ -244,10 +254,20 @@ vppctl show trace                   # expect udp-1701 -> l2tvpp-input ->
                                     # ip4-lookup -> ip4-midchain -> tunnel-output
 ```
 
-Accounting caveat: once VPP forwards, the kernel `pppN` sees no traffic, so
-accel-ppp's byte/idle accounting reads zero. Feed counters from
-`vppctl show l2tvpp session` (or the `l2tvpp_session_dump` API) into RADIUS
-interim accounting - a follow-up, see `../syncd/accel-ppp-hooks.md`.
+Accounting: once VPP forwards, the kernel `pppN` sees no traffic, so
+accel-ppp's byte/idle accounting reads zero. Enable the RADIUS relay of
+`l2tvppd` to get the VPP counters into the interim and stop records
+(`../syncd/README.md`, "Accounting").
+
+VRF, MTU and source validation of a session follow its kernel netdev
+without configuration (`design.md` step 5a). Check them with:
+
+```
+vppctl show interface l2tvpp0            # L3 MTU = MTU of the kernel netdev
+vppctl show ip fib table <vrf-table-id>  # routes of a session in a VRF
+vppctl show errors | grep urpf           # spoofed packets dropped
+vppctl show l2tvpp punt-address          # the LNS's own session address
+```
 
 ## 6. Roll back
 
