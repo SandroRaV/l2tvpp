@@ -134,9 +134,8 @@ the public URL.
 
 The upload is `build/publish.sh`, which `build-iso.sh` calls at the end. It
 sends every image folder in `build/iso/` that has no `.published` marker
-yet, oldest first, fills the public URL into its notes and uses `rsync`
-only, so the upload account on the download host can be limited to its
-directory. An image built without a destination, or whose upload failed,
+yet, oldest first, fills the public URL into its notes and needs only
+`scp` and `cat` over ssh on the download host. An image built without a destination, or whose upload failed,
 goes up with the next run: by hand, with the next build, or with the CI job
 `publish-images` (manual on `main`, automatic in a scheduled pipeline).
 `build-iso.sh` keeps the three newest image folders; an image that waits

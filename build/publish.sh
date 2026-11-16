@@ -15,11 +15,11 @@
 # else build/publish.local (gitignored), line 1 = destination, line 2 = URL.
 # Without a destination nothing happens and the exit code is 0.
 #
-# Only rsync is used, in both directions, so the upload account on the
-# download host can be limited to its directory (rrsync). A folder that went
-# up gets a .published marker and is skipped from then on. The public URL is
-# filled into the release notes at upload time: a build without PUBLISH_URL
-# writes them with the placeholder <download-url>.
+# The upload needs scp and `cat` over ssh on the download host, nothing
+# else (the DGW mirror has no rsync). A folder that went up gets a
+# .published marker and is skipped from then on. The public URL is filled
+# into the release notes at upload time: a build without PUBLISH_URL writes
+# them with the placeholder <download-url>.
 set -uo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 ISODIR="${ISODIR:-$REPO/build/iso}"
@@ -49,7 +49,23 @@ if [ -z "$DEST" ]; then
   exit 0
 fi
 
-RSH="ssh -o BatchMode=yes -o ConnectTimeout=20 -o StrictHostKeyChecking=accept-new"
+SSHOPT=(-o BatchMode=yes -o ConnectTimeout=20 -o StrictHostKeyChecking=accept-new)
+case "$DEST" in
+  *:*) HOST="${DEST%%:*}"; RDIR="${DEST#*:}" ;;
+  *)   HOST=""; RDIR="$DEST" ;;         # a local directory (tests)
+esac
+# copy files or a folder into the destination directory
+put() {
+  if [ -n "$HOST" ]; then scp -q -r "${SSHOPT[@]}" "$@" "$DEST/"; else cp -r "$@" "$RDIR/"; fi
+}
+# print the index of the download host; nothing if it has none yet
+get_index() {
+  if [ -n "$HOST" ]; then
+    ssh "${SSHOPT[@]}" "$HOST" "cat '$RDIR/vyos-images.md' 2>/dev/null || true"
+  else
+    cat "$RDIR/vyos-images.md" 2>/dev/null || true
+  fi
+}
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 rc=0
@@ -61,7 +77,7 @@ for DIR in "${waiting[@]}"; do
     sed -i -e "s|<download-url>/|${URL%/}/|g" -e "s|&lt;download-url&gt;/|${URL%/}/|g" \
       "$DIR"/*-release-notes.md "$DIR"/*-release-notes.html 2>/dev/null || true
   fi
-  if ! rsync -a -e "$RSH" --exclude '.published' "$DIR" "$DEST/"; then
+  if ! put "$DIR"; then
     echo "WARNING: upload of $IMAGE/ to $DEST failed - it stays in $DIR and is tried again by the next run"
     rc=1
     continue
@@ -70,17 +86,22 @@ for DIR in "${waiting[@]}"; do
   # the index: fetch it (a new download host has none yet), add this
   # image's line once, send it back with its browser version
   if [ -f "$DIR/$IMAGE-index-line.md" ]; then
-    rsync -q -e "$RSH" "$DEST/vyos-images.md" "$TMP/vyos-images.md" 2>/dev/null || : > "$TMP/vyos-images.md"
+    if ! get_index > "$TMP/vyos-images.md"; then
+      echo "WARNING: could not read the index on ${DEST%%:*} - $IMAGE is uploaded but not in the index, next run tries again"
+      rc=1
+      continue
+    fi
     if ! grep -qF "[$IMAGE]($IMAGE/)" "$TMP/vyos-images.md"; then
       cat "$DIR/$IMAGE-index-line.md" >> "$TMP/vyos-images.md"
     fi
     python3 "$REPO/build/release-notes.py" --render "$TMP/vyos-images.md" "$TMP/vyos-images.html" \
       --title "DGW VyOS images" >/dev/null || echo "WARNING: could not render vyos-images.html"
-    if rsync -q -e "$RSH" "$TMP"/vyos-images.* "$DEST/"; then
+    if put "$TMP"/vyos-images.*; then
       echo "index: $IMAGE in vyos-images.md and vyos-images.html"
     else
-      echo "WARNING: could not update the index on ${DEST%%:*}"
+      echo "WARNING: could not update the index on ${DEST%%:*} - next run tries again"
       rc=1
+      continue
     fi
   fi
   echo "$DEST $(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$DIR/.published"
