@@ -1,0 +1,106 @@
+# Copyright (c) 2026 Default Gateway GmbH
+# SPDX-License-Identifier: Apache-2.0
+#
+# GitLab CI of the GitLab copy of this repository (GitHub stays canonical,
+# every push lands on both). All jobs run on the image build host: a runner
+# with the tag vyos-build and the shell executor, limited to protected
+# branches and tags. A job is a shell on that host and calls the scripts in
+# build/, which start their containers themselves.
+#
+#   plugin-test   every push to main: clean plugin build + make test
+#   vyos-image    manual on main, automatic on a tag: VPP debs, VyOS ISO,
+#                 release notes (and the upload, when PUBLISH_DEST is set)
+#   base-image    manual: rebuild the VPP base image of plugin-test and push
+#                 it to this project's container registry (after a VPP bump)
+#
+# Optional CI/CD variables (project settings or the "Run pipeline" form):
+#   VYOS_BRANCH                vyos-build branch, default rolling
+#   RELEASE_NOTES              free text for the Notes section of the release
+#                              notes, first line = index line
+#   PUBLISH_DEST, PUBLISH_URL  upload target (user@host:/dir) and public base
+#                              URL, see build/build-iso.sh
+default:
+  tags:
+    - vyos-build
+
+workflow:
+  rules:
+    - if: $CI_COMMIT_TAG
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+variables:
+  # the whole history: the release notes list the commits since the last image
+  GIT_DEPTH: "0"
+  GIT_STRATEGY: fetch
+  # no -x: build/work (vyos-build tree, ccache), build/out and build/iso are
+  # gitignored and must survive from one job to the next
+  GIT_CLEAN_FLAGS: -ffd
+  BASE_IMAGE: $CI_REGISTRY_IMAGE/base:2510
+  VYOS_BRANCH: rolling
+
+stages:
+  - base
+  - test
+  - image
+
+base-image:
+  stage: base
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: manual
+      allow_failure: true
+  timeout: 3h
+  script:
+    - VPP_COMMIT=$(git ls-remote https://github.com/FDio/vpp stable/2510 | cut -c1-12)
+    - docker build -f build/Dockerfile.base -t "$BASE_IMAGE" --build-arg "VPP_COMMIT=$VPP_COMMIT" build/
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+    - docker push "$BASE_IMAGE"
+  after_script:
+    - docker logout "$CI_REGISTRY"
+
+plugin-test:
+  stage: test
+  needs: []
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  timeout: 1h
+  script:
+    # the base image is kept on the host; a fresh host pulls it once
+    - |
+      if ! docker image inspect "$BASE_IMAGE" >/dev/null 2>&1; then
+        echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+        docker pull "$BASE_IMAGE"
+        docker logout "$CI_REGISTRY"
+      fi
+    - L2TVPP_BASE_IMAGE="$BASE_IMAGE" bash build/ci-test.sh
+  artifacts:
+    when: always
+    expire_in: 30 days
+    paths:
+      - build/ci-logs/*.log
+
+vyos-image:
+  stage: image
+  needs: []
+  rules:
+    - if: $CI_COMMIT_TAG
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: manual
+      allow_failure: true
+  timeout: 4h
+  script:
+    - |
+      if [ -n "${RELEASE_NOTES:-}" ]; then
+        export RELEASE_NOTES_FILE="$CI_PROJECT_DIR/build/out/release-notes-input.txt"
+        mkdir -p "$CI_PROJECT_DIR/build/out"
+        printf '%s\n' "$RELEASE_NOTES" > "$RELEASE_NOTES_FILE"
+      fi
+    - bash build/build-vpp-debs.sh "$VYOS_BRANCH"
+    - bash build/build-iso.sh "$VYOS_BRANCH"
+    - ls -la build/iso/*/
+  artifacts:
+    expire_in: 1 year
+    paths:
+      - build/iso/*/*-release-notes.md
+      - build/iso/*/*-release.json
+      - build/iso/*/*.sha256

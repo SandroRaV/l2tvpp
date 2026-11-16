@@ -118,8 +118,11 @@ Rebuild the base image only when bumping VPP (`--build-arg VPP_COMMIT=...`)
 or when `install-dep` changes; tag it with the VPP version so old logs stay
 comparable.
 
-For every push: register the build VM as a GitHub Actions self-hosted runner
-(repo Settings > Actions > Runners, follow the generated commands) and
-`.github/workflows/ci.yml` runs the same script automatically and uploads
-the log. GitHub-hosted runners are not used on purpose: they would rebuild
-VPP on every run.
+For every push: the GitLab copy of the repository runs `.gitlab-ci.yml` on
+the image build host (a runner with the tag `vyos-build`, shell executor,
+protected branches only). `plugin-test` runs the same script on every push
+to `main` and keeps the log as a job artifact; the manual `vyos-image` job
+builds the VPP debs and the VyOS ISO, and the manual `base-image` job
+rebuilds the base image and pushes it to the project's container registry.
+Hosted runners are not used on purpose: they would rebuild VPP on every
+run. There is no GitHub Actions workflow.
