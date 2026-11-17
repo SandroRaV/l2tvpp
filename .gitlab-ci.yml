@@ -59,7 +59,11 @@ base-image:
   timeout: 3h
   script:
     - VPP_COMMIT=$(git ls-remote https://github.com/FDio/vpp stable/2510 | cut -c1-12)
-    - docker build -f build/Dockerfile.base -t "$BASE_IMAGE" --build-arg "VPP_COMMIT=$VPP_COMMIT" build/
+    # --provenance=false: without it Docker adds a build attestation and
+    # pushes an image index; the GitLab registry rejects that push with
+    # "manifest blob unknown" (seen 2026-11-17, Docker 29 with the
+    # containerd image store). A plain single manifest goes through.
+    - docker build --provenance=false -f build/Dockerfile.base -t "$BASE_IMAGE" --build-arg "VPP_COMMIT=$VPP_COMMIT" build/
     - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
     - docker push "$BASE_IMAGE"
   after_script:
